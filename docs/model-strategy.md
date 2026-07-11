@@ -15,9 +15,10 @@ Ask two questions about a ticket:
    OAuth flows — things with thousands of public examples)
 
 Both yes → **Sonnet 5**. Design decided but implementation is genuinely tricky
-(concurrency, exactly-once semantics, non-trivial algorithms, gnarly debugging) →
-**Opus 4.8** (use fast mode for iteration-heavy debugging). Design NOT decided, or
-it's a review where missed subtlety is expensive → **Fable 5**. Mechanical edits
+(concurrency, exactly-once semantics, non-trivial algorithms, gnarly debugging),
+or it's a mid-project code review → **Opus 4.8** (use fast mode for
+iteration-heavy debugging). Design NOT decided → **Fable 5**, whose deliverable
+is a **spec** (design doc + sharpened tickets), not code (D41). Mechanical edits
 (renames, lint, config bumps, commit messages) → **Haiku 4.5** or just Sonnet.
 
 ## What each model owns in this project
@@ -40,21 +41,28 @@ costs little, and you can restate the ticket to Opus with `/model`.
 - The Meet bot container + orchestrator (5.2–5.5) — Playwright lifecycle code with
   many failure modes
 - Load testing and the chaos-test suite
+- Mid-project code reviews, e.g. the full pipeline review before Phase 3 (2.8) —
+  a well-prompted Opus review catches the same class of issues (D41)
 
-### Fable 5 — design and judgment, not volume (~12%)
+### Fable 5 — the spec-writer (~11%, D41)
 
-Six tickets, almost all producing **documents or reviews rather than code**:
+Fable's deliverable is always a **document, never an implementation**: it turns a
+phase's goals into detailed, decided tickets and design docs that Sonnet/Opus can
+execute without judgment calls. The better the spec, the cheaper the model that
+can build it — that's the whole economics of this file.
 
-- 0.6 — review tenancy model/schema before everything builds on it
-- 2.1 — design the chunk/overlap/stitch algorithm and its edge cases
-- 2.6 — design the diarization–transcript merge and interruption semantics
-- 2.8 — full pipeline code review before the intelligence layer lands on top
-- 5.1 — bot architecture review after studying Vexa/meeting-bot
-- 7.1 — security review (tenant isolation, presigned scoping, container surface)
+- 2.1 — spec the chunk/overlap/stitch algorithm and its edge cases
+- 2.6 (design half) — spec the diarization–transcript merge and interruption
+  semantics; Opus implements
+- 5.1 — bot architecture spec after studying Vexa/meeting-bot
+- 7.1 — security review (tenant isolation, presigned scoping, container surface).
+  The one review kept on Fable: its value is finding what no spec anticipated,
+  and it's a single session guarding the project's worst failure mode
+- 5.6 — unscheduled escalation reserve: when Opus is stuck in a debugging loop on
+  the Meet bot for more than a couple of sessions, switch up once rather than
+  burning iterations
 
-Plus an unscheduled reserve (5.6): when Opus is stuck in a debugging loop on the
-Meet bot for more than a couple of sessions, escalate to Fable rather than burning
-Opus iterations.
+(0.6 ran on Fable before this rule was sharpened; 2.8 moved to Opus.)
 
 ## Workflow tips
 
@@ -64,9 +72,9 @@ Opus iterations.
   the cheaper models have the context to work autonomously.
 - **Escalate on the second failure, not the fifth.** If Sonnet botches a ticket
   twice, re-run once on Opus with the failure context; don't keep retrying downward.
-- **Reviews beat rewrites.** A Fable `/code-review` pass over an Opus-built
-  subsystem is far cheaper than having Fable write it, and catches the same class
-  of issues.
+- **Reviews beat rewrites.** A `/code-review` pass over a built subsystem is far
+  cheaper than having a bigger model write it. Run routine reviews on Opus; only
+  the final security review earns Fable (D41).
 - **One ticket per session.** Small, well-scoped prompts referencing these docs
   ("implement ticket 2.3 per docs/architecture.md §racing engine") keep any model
   on-target and keep context small.

@@ -291,10 +291,22 @@ free instances and a dead resume link is worse than no link.
 
 **D37 — Ticket-per-session development with per-ticket Claude Code model
 assignment: Sonnet default, Opus for decided-design/hard-implementation, Fable only
-for undecided design and critical reviews.**
+for undecided design and critical reviews.** _Fable's role narrowed by D41._
 Optimizes subscription usage and speed; most tickets are well-trodden ground. Full
 rationale in [model-strategy.md](model-strategy.md). Escalation rule: second
 failure, not fifth.
+
+**D41 — Fable is the spec-writer, not an implementer or routine reviewer.
+(Narrows D37.)**
+Observation after Phase 0: Fable's actual value-add was specs — design docs, the
+decision log, sharpened tickets — which is exactly what lets Sonnet execute most
+tickets unaided. So: Fable writes phase-start specs; mid-project code reviews
+(e.g. 2.8) run on Opus, which catches the same issue class when well-prompted.
+Two carve-outs stay on Fable: the final security review (7.1), because a
+review's value is finding what no spec anticipated and tenant leaks are the
+project's worst failure mode; and the escalation valve (5.6) when a cheaper
+model loops on one bug across sessions. _Rejected:_ scheduled Fable
+implementation tickets (spec quality, not executor size, is the lever).
 
 **D38 — Design docs are authoritative and updated in the same PR when reality
 diverges; decisions land here with a D-number.**

@@ -60,7 +60,7 @@ Google Calendar ──webhook──▶ Scheduler ──▶ Meet Bot (Playwright 
 | Doc                                              | Contents                                                                               |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------- |
 | [docs/plan.md](docs/plan.md)                     | Feasibility verdict, phased roadmap, ticket list with model assignments                |
-| [docs/decisions.md](docs/decisions.md)           | Numbered decision log (D1–D38): every choice, its reasoning, and rejected alternatives |
+| [docs/decisions.md](docs/decisions.md)           | Numbered decision log (D1–D41): every choice, its reasoning, and rejected alternatives |
 | [docs/architecture.md](docs/architecture.md)     | Full system design: pipeline, racing engine, schemas, tenancy                          |
 | [docs/infrastructure.md](docs/infrastructure.md) | Free-tier hosting plan, DNS/subdomains, cost table, fallbacks                          |
 | [docs/meet-bot.md](docs/meet-bot.md)             | Google Meet bot design (Playwright + virtual audio), Zoom later                        |

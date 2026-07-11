@@ -40,9 +40,12 @@ mobile apps, billing.
 ## 3. Phased roadmap with tickets
 
 Each ticket is tagged with the Claude Code model to run it with — rationale in
-[model-strategy.md](model-strategy.md). Rule of thumb: **Sonnet is the default**,
-Opus for concurrency/queue/analytics-heavy implementation, Fable only for design
-of the genuinely novel parts and reviews of critical paths.
+[model-strategy.md](model-strategy.md). Rule of thumb (D41): **Sonnet is the
+default**, Opus for concurrency/queue/analytics-heavy implementation and
+mid-project code reviews, Fable only as the **spec-writer** (turning a phase's
+goals into detailed, decided tickets before cheaper models execute) plus two
+carve-outs: the final security review (7.1) and rescue when a cheaper model
+loops on the same bug across sessions.
 
 ### Phase 0 — Foundation (repo, infra, walking skeleton)
 
@@ -84,7 +87,7 @@ of the genuinely novel parts and reviews of critical paths.
 | 2.5 | pyannote diarization worker on full file (runs in parallel with 2.2–2.4)                                                                                            | Sonnet                           |
 | 2.6 | Speaker–transcript merge: assign speaker to each segment by max temporal overlap; map diarized speakers to calendar attendee names                                  | **Fable** (design) → Opus (impl) |
 | 2.7 | Pipeline chaos tests: kill a worker mid-chunk, duplicate deliveries, out-of-order completion                                                                        | **Opus**                         |
-| 2.8 | Code review of the whole pipeline before Phase 3                                                                                                                    | **Fable**                        |
+| 2.8 | Code review of the whole pipeline before Phase 3                                                                                                                    | **Opus** (D41)                   |
 
 ### Phase 3 — Intelligence layer
 
@@ -159,9 +162,11 @@ stable pipeline.
 
 ## 5. Ticket count by model
 
-≈ 27 Sonnet · 14 Opus · 6 Fable (plus two mostly-manual go-live tickets, 1.7/1.8) —
-roughly 57/30/13%. Fable tickets are almost all design/review, not line-by-line
-coding. See [model-strategy.md](model-strategy.md).
+≈ 27 Sonnet · 15 Opus · 5 Fable (plus two mostly-manual go-live tickets, 1.7/1.8) —
+roughly 57/32/11%. The remaining Fable tickets are all spec-writing (2.1, 2.6
+design half, 5.1), the security review (7.1), and the stuck-bot escalation
+reserve (5.6) — zero scheduled implementation (D41). See
+[model-strategy.md](model-strategy.md).
 
 Every architectural and product decision behind these tickets is logged with
 reasoning and rejected alternatives in [decisions.md](decisions.md) — cite entries
