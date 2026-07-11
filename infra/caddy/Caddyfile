@@ -1,0 +1,5 @@
+# Ingress for the VM (D39). Caddy obtains and renews the Let's Encrypt
+# certificate for this hostname automatically — no other TLS setup exists.
+scribeflow-api.deepcoomer.dev {
+	reverse_proxy api:3000
+}

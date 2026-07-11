@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: scribeflow
+          POSTGRES_PASSWORD: scribeflow
+          POSTGRES_DB: scribeflow
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U scribeflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://scribeflow:scribeflow@localhost:5432/scribeflow
+      JWT_SECRET: ci-test-secret-not-for-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+      - run: pnpm format
+      - run: pnpm typecheck
+      - run: pnpm --filter @scribeflow/api db:generate
+      - run: pnpm --filter @scribeflow/api db:migrate
+      - run: pnpm test
+
+  workers:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run mypy .
+        continue-on-error: true # no workers exist yet (Phase 1); flip on once they land
+      - run: uv run pytest
+        continue-on-error: true # same — placeholder until Phase 1 tickets add tests

@@ -1,0 +1,113 @@
+name: scribeflow
+
+# One-VM layout per docs/infrastructure.md — RAM budget assumes this exact
+# set of services on the 12 GB Oracle Always Free instance. Adding a service
+# means revisiting that budget table, not just adding it here.
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    <<: *restart
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-scribeflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scribeflow}
+      POSTGRES_DB: ${POSTGRES_DB:-scribeflow}
+    volumes:
+      - ./.data/postgres:/var/lib/postgresql/data
+    ports:
+      # Host port 55432, not 5432 — many dev machines (including the one
+      # this was built on) already run a local Postgres on 5432.
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scribeflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    <<: *restart
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-scribeflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-scribeflow}
+    volumes:
+      - ./.data/rabbitmq:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672" # management UI — tunnel-only, never public
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    <<: *restart
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-scribeflow}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-scribeflow}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-scribeflow}
+    volumes:
+      - ./.data/clickhouse:/var/lib/clickhouse
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    <<: *restart
+    env_file: ../api/.env
+    environment:
+      # Overrides whatever DATABASE_URL is in api/.env: inside the compose
+      # network the DB is reachable by service name, not localhost.
+      DATABASE_URL: postgres://${POSTGRES_USER:-scribeflow}:${POSTGRES_PASSWORD:-scribeflow}@postgres:5432/${POSTGRES_DB:-scribeflow}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # Public ingress (D39): Caddy terminates TLS with automatic Let's Encrypt
+  # certs and proxies to the api container. VM-only — don't start this
+  # locally (it binds 80/443 and would try to obtain real certificates).
+  # Requires: A record scribeflow-api.deepcoomer.dev -> VM IP, and 80+443
+  # open in BOTH the Oracle security list and ufw.
+  caddy:
+    image: caddy:2-alpine
+    <<: *restart
+    ports:
+      - "80:80" # ACME HTTP-01 challenge + redirect to https
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./.data/caddy:/data
+    depends_on:
+      - api
+    deploy:
+      resources:
+        limits:
+          memory: 128m

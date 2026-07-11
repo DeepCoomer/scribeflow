@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+
+# Docker/infra volumes
+infra/.data/
+
+# editors
+.vscode/*
+!.vscode/extensions.json
+.idea/

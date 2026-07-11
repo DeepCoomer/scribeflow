@@ -1,0 +1,9 @@
+{
+  "name": "@scribeflow/bot",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "echo 'bot: nothing to typecheck yet (Phase 5)'"
+  }
+}
