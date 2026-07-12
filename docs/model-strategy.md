@@ -36,7 +36,7 @@ costs little, and you can restate the ticket to Opus with `/model`.
 - RabbitMQ topology, retry/DLQ machinery, idempotent worker framework (1.2, 1.3)
 - The racing engine implementation: slicer, parallel transcriber with shared rate
   limiting, fan-in stitcher (2.2–2.4, 2.7)
-- ClickHouse schema, materialized views, aggregation endpoints (4.1, 4.3)
+- (Phase 4 analytics moved to Sonnet when it moved to Postgres, D42)
 - LLM extraction worker with strict-JSON retry loops (3.1)
 - The Meet bot container + orchestrator (5.2–5.5) — Playwright lifecycle code with
   many failure modes

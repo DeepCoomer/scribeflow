@@ -23,24 +23,23 @@ Domain renewal for `deepcoomer.dev` is the only pre-existing cost; no new spend.
   is ~130 chunk requests — far inside 2,000/day. This is portfolio scale with head-room.
 - **R2 10 GB:** a 1-hour meeting re-encoded to 16 kHz mono Opus ≈ 30 MB → ~300
   meeting-hours stored. Lifecycle rule: delete raw audio 30 days after the transcript
-  is final (keep transcripts/analytics forever — they live in Postgres/ClickHouse).
+  is final (keep transcripts/metrics forever — they live in Postgres).
 - **12 GB RAM budget on the VM:**
 
-  | Service                                    | Reserved |
-  | ------------------------------------------ | -------- |
-  | ClickHouse (capped via config)             | 3 GB     |
-  | Postgres                                   | 1 GB     |
-  | RabbitMQ                                   | 0.75 GB  |
-  | API + Caddy ingress                        | 0.75 GB  |
-  | Python workers (transcribe/stitch/extract) | 1.5 GB   |
-  | pyannote diarizer (peak)                   | 2 GB     |
-  | 1 Meet-bot container (Chromium + Xvfb)     | 2 GB     |
-  | Headroom / page cache                      | 1 GB     |
+  | Service                                     | Reserved |
+  | ------------------------------------------- | -------- |
+  | Postgres                                    | 1 GB     |
+  | RabbitMQ                                    | 0.75 GB  |
+  | API + Caddy ingress                         | 0.75 GB  |
+  | Python workers (transcribe/stitch/extract)  | 1.5 GB   |
+  | pyannote diarizer (peak)                    | 2 GB     |
+  | 2 Meet-bot containers (Chromium + Xvfb × 2) | 4 GB     |
+  | Headroom / page cache                       | 2 GB     |
 
-  Constraint that falls out: **one concurrent bot-recorded meeting** (two if no
-  diarization is running). The orchestrator enforces this with a semaphore; extra
-  meetings queue. Fine for a demo/small team; scale-out path is "add a host, point
-  it at RabbitMQ."
+  Dropping ClickHouse (D42) freed 3 GB, which buys the **second concurrent
+  bot-recorded meeting**. The orchestrator enforces the cap with a semaphore
+  (2, or 1 while diarization is at peak); extra meetings queue. Fine for a
+  demo/small team; scale-out path is "add a host, point it at RabbitMQ."
 
 ## DNS & subdomains (D39/D40)
 
@@ -84,7 +83,7 @@ List and ufw); both must allow the ports.
 2. Harden: SSH keys only, ufw default-deny inbound with 22/80/443 allowed
    (mirror in the VCN Security List), unattended-upgrades, fail2ban.
 3. Install Docker + Compose; single `infra/compose.yml` for
-   postgres, rabbitmq, clickhouse, api, workers, caddy.
+   postgres, rabbitmq, api, workers, caddy.
 4. DNS: CNAME `scribeflow` → Vercel, A `scribeflow-api` → VM IP (exact steps
    in `infra/README.md` §Going live).
 5. R2: create bucket `scribeflow`, scoped API token (that bucket only), CORS for
@@ -94,8 +93,7 @@ List and ufw); both must allow the ports.
    (baked into the worker image at build time, not at runtime).
 8. Google Cloud project: OAuth consent (testing mode), Calendar API enabled,
    client credentials as secrets.
-9. Backups: nightly `pg_dump` + ClickHouse backup → R2 (counts inside the 10 GB;
-   keep 7 days).
+9. Backups: nightly `pg_dump` → R2 (counts inside the 10 GB; keep 7 days).
 
 ## Secrets & config
 

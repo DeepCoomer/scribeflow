@@ -2,9 +2,9 @@
 
 ScribeFlow is a self-hosted, $0/month meeting chief-of-staff agent: a bot joins
 Google Meet calls, an async pipeline transcribes (Groq Whisper) + diarizes
-(pyannote) the audio, an LLM extracts action items, ClickHouse powers team
-analytics, and an agent layer provides RAG chat over meeting history plus
-human-approved follow-ups.
+(pyannote) the audio, an LLM extracts action items and summaries (delivered via
+dashboard + approval-gated email), and an agent layer provides RAG chat over
+meeting history, follow-up drafts, and action-item nudges.
 
 **Status: Phase 0 complete** (monorepo, compose stack, schema, API skeleton with
 auth + tenant middleware). Next: Phase 1 per `docs/plan.md`. The design in `docs/`
@@ -33,7 +33,7 @@ in the same PR.
 api/       Node 22 + TypeScript + Fastify + Zod (multi-tenant REST + SSE)
 web/       React + Vite dashboard (static, deployed to Vercel)
 workers/   Python 3.12 pipeline workers (slicer, transcriber, diarizer,
-           stitcher, extractor, embedder, ch-ingest)
+           stitcher, extractor, embedder)
 bot/       Playwright Meet bot (runs inside its own Docker image) + orchestrator
 infra/     Docker Compose, Caddy ingress config, provisioning runbook
 docs/      the design docs above — keep in sync with code
@@ -48,8 +48,8 @@ ticket ID and the relevant doc section in your work.
    the API only mints URLs and enqueues jobs.
 2. **Every DB access is tenant-scoped.** Repository functions take `tenantId` as a
    required parameter — no defaults, no "admin" bypass helpers. R2 keys are
-   prefixed `tenant/{tenantId}/`. ClickHouse queries go through the query builder
-   that injects the tenant predicate.
+   prefixed `tenant/{tenantId}/`. Analytics aggregates use the same repository
+   pattern — no separate query path that could skip scoping.
 3. **Jobs are idempotent.** Deterministic job IDs (`{meetingId}:{stage}:{chunkIdx}`),
    upsert-only writes, safe under RabbitMQ redelivery. Fan-in uses the atomic
    `chunks_done` counter — never a distributed lock.
@@ -80,7 +80,7 @@ ticket ID and the relevant doc section in your work.
 
 ```sh
 pnpm install                                  # all JS/TS workspaces
-docker compose -f infra/compose.yml up -d postgres rabbitmq clickhouse
+docker compose -f infra/compose.yml up -d postgres rabbitmq
 pnpm --filter @scribeflow/api db:generate     # after schema.ts changes
 pnpm --filter @scribeflow/api db:migrate
 pnpm dev:api                                  # API on :3000 (PORT=… to override)

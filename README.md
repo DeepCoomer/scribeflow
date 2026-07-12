@@ -2,11 +2,12 @@
 
 **A self-hosted meeting chief-of-staff agent** — a free, self-operated alternative to
 Read.ai / Fireflies. A bot joins your Google Meet calls, records the audio,
-transcribes it with speaker diarization, extracts action items with an LLM, and
-surfaces team analytics on a real-time dashboard. Then the agent layer makes the
-team more productive: chat with your entire meeting history ("what did we decide
-about pricing last month?"), get human-approved follow-up drafts after every
-meeting, and automatic nudges when action items go stale.
+transcribes it with speaker diarization, and extracts action items and a summary
+with an LLM — delivered to your inbox (approval-gated) and a real-time dashboard.
+Then the agent layer makes the team more productive: chat with your entire meeting
+history ("what did we decide about pricing last month?"), get human-approved
+follow-up drafts after every meeting, and automatic nudges when action items go
+stale.
 
 - **Live at:** `https://scribeflow.deepcoomer.dev` (app) · `https://scribeflow-api.deepcoomer.dev` (API)
 - **Operating cost:** $0/month (see [docs/infrastructure.md](docs/infrastructure.md))
@@ -32,13 +33,13 @@ Google Calendar ──webhook──▶ Scheduler ──▶ Meet Bot (Playwright 
                                            pyannote diarization (full file)
                                            deterministic stitch + speaker merge
                                                 │
-                                ┌───────────────┴───────────────┐
-                                ▼                               ▼
-                        Postgres (meetings,             ClickHouse (utterances,
-                        action items, tenants)          talk-time, sentiment)
-                                └───────────────┬───────────────┘
                                                 ▼
-                          Node.js API (Fastify) ──SSE──▶ React dashboard
+                        Postgres (tenants, meetings, transcripts,
+                        action items, agent memory/pgvector)
+                                                │
+                                                ▼
+                Node.js API (Fastify) ──SSE──▶ React dashboard
+                                      └──▶ summary email (approval-gated)
 ```
 
 ## Core design decisions
@@ -49,9 +50,9 @@ Google Calendar ──webhook──▶ Scheduler ──▶ Meet Bot (Playwright 
    transcribed concurrently; transcripts are stitched back deterministically using
    timestamp offsets. Diarization runs _once_ on the full file (speaker clustering is
    global) and is merged with the stitched transcript by temporal overlap.
-3. **ClickHouse for analytics, Postgres for state.** Utterance-level rows go to
-   ClickHouse so talk-time ratios, interruption counts, and sentiment-over-time stay
-   fast at millions of rows.
+3. **One database until the data demands two.** Postgres holds state, transcripts,
+   metrics, and the agent's vector memory (pgvector); the ClickHouse design is
+   documented (D17/D42) and deferred until utterances reach millions of rows.
 4. **Multi-tenant from day one.** Every row carries `tenant_id`; scoping is enforced
    in one middleware layer, not per-handler.
 

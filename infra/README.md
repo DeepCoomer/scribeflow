@@ -1,7 +1,7 @@
 # infra
 
-Local dev and VM deployment for the backing services (Postgres, RabbitMQ,
-ClickHouse), the API container, and the Caddy HTTPS ingress. See
+Local dev and VM deployment for the backing services (Postgres, RabbitMQ),
+the API container, and the Caddy HTTPS ingress. See
 [docs/infrastructure.md](../docs/infrastructure.md) for the full cost/RAM
 budget and [docs/decisions.md](../docs/decisions.md) D25–D26 + D39–D40 for
 the reasoning behind each choice here.
@@ -11,17 +11,16 @@ the reasoning behind each choice here.
 ```sh
 cp infra/.env.example infra/.env      # edit passwords if you care, local-only
 cp api/.env.example api/.env          # DATABASE_URL already matches compose's mapped port (55432, not 5432 — see compose.yml)
-docker compose -f infra/compose.yml up -d postgres rabbitmq clickhouse
+docker compose -f infra/compose.yml up -d postgres rabbitmq
 pnpm --filter @scribeflow/api db:generate   # first time / after schema changes
 pnpm --filter @scribeflow/api db:migrate
 pnpm dev:api                          # runs the API on the host, against the containers
 curl localhost:3000/health
 ```
 
-RabbitMQ and ClickHouse aren't consumed by any code yet (Phase 1+) — they're
-started here so the full target stack is exercised from day one and so
-`docker compose config` / `up` stay proof that the compose file is correct,
-not aspirational.
+RabbitMQ isn't consumed by any code yet (Phase 1+) — it's started here so the
+full target stack is exercised from day one and so `docker compose config` /
+`up` stay proof that the compose file is correct, not aspirational.
 
 ## Building the api container
 

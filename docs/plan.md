@@ -1,22 +1,22 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-11_
+_Last updated: 2026-07-12_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
 Every component has a free tier or self-hosted path that covers portfolio/small-team
 scale (a handful of meetings per day):
 
-| Need                                               | Free solution                                                    | Limit that matters                                      |
-| -------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
-| Compute (API, queue, DB, ClickHouse, workers, bot) | Oracle Cloud Always Free ARM VM                                  | 2 OCPU / 12 GB RAM (reduced from 4/24 in June 2026)     |
-| Transcription                                      | Groq free tier, `whisper-large-v3-turbo` (your existing key)     | ~2 h of audio per clock-hour; 2,000 req/day; 100 MB/req |
-| Action-item extraction + summaries + sentiment     | Groq free tier, `llama-3.3-70b-versatile` (same key)             | rate limits generous for batch use                      |
-| Diarization                                        | pyannote 3.x, self-hosted on CPU                                 | ~real-time speed on ARM CPU; fine async                 |
-| Object storage                                     | Cloudflare R2                                                    | 10 GB free, zero egress fees                            |
-| Frontend hosting                                   | Vercel Hobby (D40)                                               | non-commercial use; fine for a portfolio                |
-| DNS + TLS                                          | records at existing provider; Vercel + Caddy/Let's Encrypt (D39) | free                                                    |
-| Calendar integration                               | Google Calendar API                                              | free quota is ample                                     |
+| Need                                           | Free solution                                                    | Limit that matters                                      |
+| ---------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
+| Compute (API, queue, DB, workers, bot)         | Oracle Cloud Always Free ARM VM                                  | 2 OCPU / 12 GB RAM (reduced from 4/24 in June 2026)     |
+| Transcription                                  | Groq free tier, `whisper-large-v3-turbo` (your existing key)     | ~2 h of audio per clock-hour; 2,000 req/day; 100 MB/req |
+| Action-item extraction + summaries + sentiment | Groq free tier, `llama-3.3-70b-versatile` (same key)             | rate limits generous for batch use                      |
+| Diarization                                    | pyannote 3.x, self-hosted on CPU                                 | ~real-time speed on ARM CPU; fine async                 |
+| Object storage                                 | Cloudflare R2                                                    | 10 GB free, zero egress fees                            |
+| Frontend hosting                               | Vercel Hobby (D40)                                               | non-commercial use; fine for a portfolio                |
+| DNS + TLS                                      | records at existing provider; Vercel + Caddy/Let's Encrypt (D39) | free                                                    |
+| Calendar integration                           | Google Calendar API                                              | free quota is ample                                     |
 
 Risks to the $0 claim (all have fallbacks, see [infrastructure.md](infrastructure.md)):
 Oracle free-tier signup can be finicky and was just downsized; if it fails entirely,
@@ -27,15 +27,15 @@ existing Claude Code subscription.
 ## 2. Scope
 
 **In (v1):** Google Meet bot, upload-a-file path, async pipeline (slice → parallel
-Whisper → diarize → stitch → extract), multi-tenant API, ClickHouse analytics
-dashboard, Google Calendar auto-join, and the **agent layer** — RAG chat over all
-meeting history, human-approved follow-up drafts, and action-item nudges. The agent
-layer is what moves the product from "records what happened" to "makes the team
-more productive": meetings become searchable memory and commitments get followed up
-automatically.
+Whisper → diarize → stitch → extract), multi-tenant API + dashboard (transcripts,
+summaries, action items; post-meeting summary email), Google Calendar auto-join,
+and the **agent layer** — RAG chat over all meeting history, human-approved
+follow-up drafts, and action-item nudges. The agent layer is what makes the "AI
+agent" claim real: the bot perceives the calendar and acts autonomously, and the
+agent tracks the commitments made in meetings until they're done.
 
-**Out (v1):** Zoom/Teams (Phase 8 stretch), real-time in-meeting transcription,
-mobile apps, billing.
+**Out (v1):** Zoom/Teams (Phase 8 stretch), team analytics dashboard + ClickHouse
+(Phase 4 stretch, D42), real-time in-meeting transcription, mobile apps, billing.
 
 ## 3. Phased roadmap with tickets
 
@@ -49,14 +49,14 @@ loops on the same bug across sessions.
 
 ### Phase 0 — Foundation (repo, infra, walking skeleton)
 
-| #   | Ticket                                                                                                                                                          | Model     |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
-| 0.1 | Monorepo scaffold (pnpm workspaces: `api/`, `web/`, `workers/`, `bot/`, `infra/`), lint, CI                                                                     | Sonnet    |
-| 0.2 | Docker Compose for Postgres + RabbitMQ + ClickHouse + Caddy ingress (config only — actual VM provisioning deferred to 1.8, D39)                                 | Sonnet    |
-| 0.3 | Hosting/DNS decision + docs: `scribeflow.deepcoomer.dev` (Vercel, D40), `scribeflow-api.deepcoomer.dev` (A record → VM, Caddy TLS) — records created at 1.7/1.8 | Sonnet    |
-| 0.4 | Postgres schema v1 + migrations (tenants, users, meetings, jobs, action_items)                                                                                  | Sonnet    |
-| 0.5 | Fastify API skeleton: health, auth (email+password + Google OAuth), tenant middleware                                                                           | Sonnet    |
-| 0.6 | Review of tenancy model & schema before anything builds on it                                                                                                   | **Fable** |
+| #   | Ticket                                                                                                                                                               | Model     |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| 0.1 | Monorepo scaffold (pnpm workspaces: `api/`, `web/`, `workers/`, `bot/`, `infra/`), lint, CI                                                                          | Sonnet    |
+| 0.2 | Docker Compose for Postgres + RabbitMQ + Caddy ingress (config only — actual VM provisioning deferred to 1.8, D39; ClickHouse was included here then removed by D42) | Sonnet    |
+| 0.3 | Hosting/DNS decision + docs: `scribeflow.deepcoomer.dev` (Vercel, D40), `scribeflow-api.deepcoomer.dev` (A record → VM, Caddy TLS) — records created at 1.7/1.8      | Sonnet    |
+| 0.4 | Postgres schema v1 + migrations (tenants, users, meetings, jobs, action_items)                                                                                       | Sonnet    |
+| 0.5 | Fastify API skeleton: health, auth (email+password + Google OAuth), tenant middleware                                                                                | Sonnet    |
+| 0.6 | Review of tenancy model & schema before anything builds on it                                                                                                        | **Fable** |
 
 ### Phase 1 — Upload → transcript MVP (no bot yet)
 
@@ -107,14 +107,19 @@ loops on the same bug across sessions.
 | 3.7 | Follow-up agent: after each meeting, draft a follow-up email (summary + action items per owner) shown in dashboard for one-click approve/edit/send — human-in-the-loop, never auto-sends | Sonnet   |
 | 3.8 | Nudge agent: daily cron scans open action items past due, notifies owners (dashboard + optional email digest)                                                                            | Sonnet   |
 
-### Phase 4 — Analytics (ClickHouse)
+### Phase 4 (stretch) — Team analytics dashboard (D42)
 
-| #   | Ticket                                                                                                                        | Model    |
-| --- | ----------------------------------------------------------------------------------------------------------------------------- | -------- |
-| 4.1 | ClickHouse schema: `utterances`, `meeting_metrics` + materialized views (talk-time ratio, interruptions, sentiment-over-time) | **Opus** |
-| 4.2 | Ingestion worker: pipeline output → ClickHouse batch inserts                                                                  | Sonnet   |
-| 4.3 | Analytics API endpoints (aggregations, per-team, per-person, time-windowed)                                                   | **Opus** |
-| 4.4 | Dashboard: charts for talk-time, interruption matrix, sentiment timeline, meeting load                                        | Sonnet   |
+Deferred behind the bot and agent layer: the v1 product (transcript, summary,
+action items, agent) never reads these aggregates. Analytics are served from
+**Postgres** — at portfolio scale utterances number in the thousands and
+aggregate instantly; the retained ClickHouse design (D17/D18) is the documented
+scale-out path if that ever changes.
+
+| #   | Ticket                                                                                                       | Model  |
+| --- | ------------------------------------------------------------------------------------------------------------ | ------ |
+| 4.1 | Postgres `utterance_metrics` (talk seconds, interruptions, sentiment per speaker/meeting), written at stitch | Sonnet |
+| 4.2 | Analytics API endpoints (aggregations per-team, per-person, time-windowed) over Postgres                     | Sonnet |
+| 4.3 | Dashboard: charts for talk-time, interruption matrix, sentiment timeline, meeting load                       | Sonnet |
 
 ### Phase 5 — Google Meet bot (the flagship)
 
@@ -162,8 +167,9 @@ stable pipeline.
 
 ## 5. Ticket count by model
 
-≈ 27 Sonnet · 15 Opus · 5 Fable (plus two mostly-manual go-live tickets, 1.7/1.8) —
-roughly 57/32/11%. The remaining Fable tickets are all spec-writing (2.1, 2.6
+≈ 28 Sonnet · 13 Opus · 5 Fable (plus two mostly-manual go-live tickets, 1.7/1.8) —
+roughly 61/28/11%. Phase 4's move to Postgres (D42) also downgraded its tickets
+from Opus to Sonnet. The remaining Fable tickets are all spec-writing (2.1, 2.6
 design half, 5.1), the security review (7.1), and the stuck-bot escalation
 reserve (5.6) — zero scheduled implementation (D41). See
 [model-strategy.md](model-strategy.md).

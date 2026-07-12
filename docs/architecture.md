@@ -10,7 +10,7 @@
 | Workers        | Python 3.12 (`pika`, `ffmpeg`, `pyannote.audio`, Groq SDK) | Oracle VM (Docker)                    |
 | Meet bot       | Node.js + Playwright + Xvfb + PulseAudio                   | Ephemeral Docker containers on the VM |
 | State DB       | Postgres 16                                                | Oracle VM (Docker)                    |
-| Analytics DB   | ClickHouse                                                 | Oracle VM (Docker)                    |
+| Analytics      | Postgres aggregates (D42; ClickHouse deferred)             | Oracle VM (Docker)                    |
 | Object storage | Cloudflare R2 (S3 API)                                     | Cloudflare                            |
 | Ingress        | Caddy (auto Let's Encrypt TLS, D39)                        | VM :443                               |
 
@@ -41,8 +41,10 @@ duration_hint}` to the `pipeline` exchange.
    done, stitches chunks, merges speakers, marks transcript final.
 7. **Intelligence** (`extractor`): LLM pass for action items / decisions / summary;
    sentiment pass per utterance.
-8. **Analytics ingest**: final utterances batch-inserted into ClickHouse.
-9. **Notify**: API pushes SSE events at every state transition; dashboard updates live.
+8. **Metrics** (stretch, D42): per-speaker utterance metrics (talk seconds,
+   interruptions, sentiment) written to Postgres at stitch time.
+9. **Notify**: API pushes SSE events at every state transition; dashboard updates
+   live, and the summary email (with action items) goes out for approval.
 
 ## The racing engine
 
@@ -104,7 +106,6 @@ exchange: pipeline (topic)
   meeting.diarize    → q.diarizer        (prefetch 1 — CPU-bound)
   meeting.stitch     → q.stitcher
   meeting.extract    → q.extractor
-  analytics.ingest   → q.ch-ingest
 each queue → paired DLQ with 30s/2m/10m retry TTLs, then parking-lot queue
 ```
 
@@ -132,22 +133,14 @@ action_items(id, meeting_id, tenant_id, text, owner_user_id, due_date,
 bot_sessions(id, meeting_id, container_id, state, joined_at, left_at, error)
 ```
 
-### ClickHouse (analytics, append-only)
+### Analytics (Postgres for v1 — D42)
 
-```sql
-CREATE TABLE utterances (
-  tenant_id UUID, meeting_id UUID, speaker String,
-  ts_start DateTime64(3), duration_s Float32,
-  word_count UInt16, sentiment Float32,   -- [-1, 1]
-  is_interruption UInt8, is_question UInt8
-) ENGINE = MergeTree
-ORDER BY (tenant_id, meeting_id, ts_start);
-```
-
-Materialized views pre-aggregate per (tenant, speaker, day): talk seconds,
-interruption count, question count, avg sentiment. Dashboard queries hit the MVs;
-raw-utterance drill-down hits the base table. This is what keeps "team analytics
-over millions of rows" interactive on a shared 12 GB VM.
+Per-speaker metrics (talk seconds, interruption/question counts, sentiment) are
+computed at stitch time into a `utterance_metrics` table (Phase 4, stretch) and
+aggregated with plain SQL — at portfolio scale that's thousands of rows, which
+Postgres serves instantly. The original ClickHouse design (MergeTree ordered by
+`(tenant_id, meeting_id, ts_start)` + per-day materialized views) is retained in
+D17/D18 as the documented migration path if utterances ever reach the millions.
 
 ## Multi-tenancy
 
@@ -156,8 +149,8 @@ over millions of rows" interactive on a shared 12 GB VM.
   (no default), so forgetting scoping is a compile error, not a data leak.
 - R2 keys are prefixed `tenant/{tenant_id}/…` and presigned URLs are generated
   server-side only for the caller's own prefix.
-- ClickHouse queries go through one query-builder that always injects the
-  `tenant_id` predicate (it's also the first ORDER BY key, so it's cheap).
+- Analytics aggregates go through repository functions like everything else —
+  same required-`tenantId` rule, no separate query path to forget scoping in.
 
 ## Real-time dashboard
 

@@ -115,6 +115,7 @@ reasons about offsets.
 ## Data layer
 
 **D17 — Two databases: Postgres for state, ClickHouse for analytics.**
+_SUPERSEDED by D42 for v1; the design below is retained as the scale-out path._
 Postgres owns transactional truth (tenants, meetings, jobs, action items — needs
 updates, FKs, row locks). ClickHouse owns append-only utterances where dashboard
 queries aggregate millions of rows; its MergeTree + materialized views keep
@@ -125,7 +126,8 @@ and vice versa on 12 GB), ClickHouse-only (no transactional updates), TimescaleD
 portfolio signal).
 
 **D18 — ClickHouse ordering key starts with `tenant_id`; dashboards read from
-materialized views, drill-downs from the base table.**
+materialized views, drill-downs from the base table.** _Deferred with D42 —
+applies if/when ClickHouse is introduced._
 Tenant-first ordering makes tenant scoping nearly free at query time; MVs
 pre-aggregate per (tenant, speaker, day) so the dashboard never scans raw
 utterances.
@@ -137,8 +139,8 @@ no new database — retrieval joins directly against tenant-scoped Postgres rows
 tenant-isolation surface), OpenAI embeddings (violates $0).
 
 **D20 — Multi-tenancy enforced structurally: `tenantId` is a required parameter of
-every repository function, R2 keys are tenant-prefixed, ClickHouse goes through a
-predicate-injecting query builder.**
+every repository function, R2 keys are tenant-prefixed, and any future analytics
+store (D42) goes through a predicate-injecting query builder.**
 Scoping enforced by function signature turns "forgot the WHERE tenant_id" from a
 data leak into a compile error. _Rejected:_ Postgres row-level security alone
 (silent when misconfigured, doesn't cover R2 or ClickHouse) — may be added later as
@@ -313,3 +315,20 @@ diverges; decisions land here with a D-number.**
 The docs are how cheaper models (and future Deep) get context without re-deriving
 it, and this log is the interview-prep artifact: every "why X?" question an
 interviewer can ask should have a D-entry answer.
+
+**D42 — No ClickHouse in v1: analytics live in Postgres; Phase 4 becomes a
+stretch phase. (Supersedes D17/D18 for v1.)**
+Deep asked the right question before Phase 1: the product he's building — bot
+joins the meeting, user gets the transcript/summary/action items by email or
+dashboard, plus the agent layer — never touches ClickHouse. It served only the
+Phase 4 analytics dashboard, and at portfolio scale utterances number in the
+thousands, where Postgres aggregates instantly; keeping it was partly
+resume-driven (D17 admitted "portfolio signal" as a factor). Dropping it frees
+3 GB of the 12 GB RAM budget — enough for a **second concurrent bot meeting** —
+and removes a whole service from the ops surface. The interview story improves,
+not worsens: "Postgres now, ClickHouse when utterances hit millions — here's the
+retained design (D17/D18)" demonstrates judgment. RabbitMQ explicitly **stays**:
+it is the racing engine's backbone (fan-out/fan-in, retries/DLQ, polyglot
+consumers), not decoration. _Rejected:_ dropping RabbitMQ too (reduces the
+project to bot + API-call glue — the thin-agent shape rejected in D4), and
+keeping ClickHouse as-is (a 3 GB service with no v1 reader).
