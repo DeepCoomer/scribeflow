@@ -6,6 +6,8 @@ import {
   integer,
   boolean,
   numeric,
+  doublePrecision,
+  jsonb,
   index,
   uniqueIndex,
   pgEnum,
@@ -58,6 +60,7 @@ export const meetingStatusEnum = pgEnum("meeting_status", [
   "pending",
   "uploading",
   "processing",
+  "transcribing",
   "partial",
   "done",
   "failed",
@@ -161,3 +164,45 @@ export const actionItems = pgTable(
   // Phase 3b nudge agent's daily scan (open + past due), per 0.6 review.
   (t) => [index("action_items_tenant_status_idx").on(t.tenantId, t.status)],
 );
+
+// --- transcript_segments ---------------------------------------------------
+// Written by the transcription workers (Phase 1: single-shot, chunk_idx 0;
+// Phase 2: one writer per chunk). No tenant_id column by design
+// (docs/architecture.md schema): reads join through meetings, and repository
+// functions still require tenantId (D20). start_s/end_s are ABSOLUTE meeting
+// time — workers shift by the chunk offset before persisting (invariant 4).
+
+export const transcriptSegments = pgTable(
+  "transcript_segments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    meetingId: uuid("meeting_id")
+      .notNull()
+      .references(() => meetings.id, { onDelete: "cascade" }),
+    chunkIdx: integer("chunk_idx").notNull().default(0),
+    // Null until the diarization merge assigns one (Phase 2, ticket 2.6).
+    speaker: text("speaker"),
+    startS: doublePrecision("start_s").notNull(),
+    endS: doublePrecision("end_s").notNull(),
+    text: text("text").notNull(),
+    wordsJsonb: jsonb("words_jsonb"),
+  },
+  (t) => [
+    // The viewer reads a whole meeting ordered by time; the idempotent
+    // replace-by-chunk write path deletes by (meeting, chunk).
+    index("transcript_segments_meeting_start_idx").on(t.meetingId, t.startS),
+    index("transcript_segments_meeting_chunk_idx").on(t.meetingId, t.chunkIdx),
+  ],
+);
+
+// --- rate_limiter_buckets ---------------------------------------------------
+// Backing row for the shared Groq token bucket (D24): workers take a Postgres
+// advisory lock keyed on the bucket, refill tokens by elapsed time, and spend
+// one per request — org-wide 20 req/min regardless of worker count. One row
+// per external limit (not per tenant; the Groq quota is account-global).
+
+export const rateLimiterBuckets = pgTable("rate_limiter_buckets", {
+  key: text("key").primaryKey(),
+  tokens: doublePrecision("tokens").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

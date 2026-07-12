@@ -60,6 +60,12 @@ loops on the same bug across sessions.
 
 ### Phase 1 — Upload → transcript MVP (no bot yet)
 
+_Status: 1.1–1.6 **done** (July 2026). 1.7/1.8 (manual go-live) remain — the
+Oracle account signup should start now, capacity permitting. Implementation
+notes: retry ladder D43, SSE token auth D44, interim `meeting.uploaded` →
+`q.transcriber` binding D45; the D22 `TRANSCRIBE_BACKEND=groq|local` switch
+shipped with 1.4 as planned._
+
 | #   | Ticket                                                                                                                                                                                                                                                                                                       | Model           |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------- |
 | 1.1 | R2 presigned upload endpoint + client; enqueue `meeting.uploaded` on completion                                                                                                                                                                                                                              | Sonnet          |

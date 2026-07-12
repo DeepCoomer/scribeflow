@@ -1,14 +1,19 @@
 import Fastify from "fastify";
 import sensible from "@fastify/sensible";
+import cors from "@fastify/cors";
 import oauth2 from "@fastify/oauth2";
 import type { Env } from "./config.js";
 import configPlugin from "./plugins/config.js";
 import dbPlugin from "./plugins/db.js";
 import authPlugin from "./plugins/auth.js";
 import tenantPlugin from "./plugins/tenant.js";
+import queuePlugin from "./plugins/queue.js";
+import eventsPlugin from "./plugins/events.js";
+import { createR2 } from "./lib/r2.js";
 import healthRoutes from "./routes/health.js";
 import authRoutes from "./routes/auth.js";
 import meRoutes from "./routes/me.js";
+import meetingRoutes from "./routes/meetings.js";
 
 // pino's transport option is only valid when present at all — passing
 // `transport: undefined` trips exactOptionalPropertyTypes, so it's built
@@ -23,12 +28,22 @@ export async function buildApp(env: Env) {
   const app = Fastify({ logger: loggerOptions(env) });
 
   // Order matters: config before db/auth (both read app.config), tenant
-  // after auth (it depends on @fastify/jwt being registered).
+  // after auth (it depends on @fastify/jwt being registered), events after
+  // queue (it attaches to the queue's fanout consumer).
   await app.register(configPlugin, env);
   await app.register(sensible);
+  await app.register(cors, {
+    origin: env.CORS_ORIGINS.split(",").map((o) => o.trim()),
+  });
   await app.register(dbPlugin);
   await app.register(authPlugin);
   await app.register(tenantPlugin);
+  await app.register(queuePlugin);
+  await app.register(eventsPlugin);
+  app.decorate("r2", createR2(env));
+  if (!app.r2) {
+    app.log.warn("R2 credentials not set — upload endpoints disabled (503)");
+  }
 
   if (env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET) {
     await app.register(oauth2, {
@@ -61,6 +76,7 @@ export async function buildApp(env: Env) {
   await app.register(healthRoutes);
   await app.register(authRoutes);
   await app.register(meRoutes);
+  await app.register(meetingRoutes);
 
   return app;
 }

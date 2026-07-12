@@ -106,8 +106,20 @@ exchange: pipeline (topic)
   meeting.diarize    → q.diarizer        (prefetch 1 — CPU-bound)
   meeting.stitch     → q.stitcher
   meeting.extract    → q.extractor
-each queue → paired DLQ with 30s/2m/10m retry TTLs, then parking-lot queue
+exchange: events (fanout) → per-API-instance exclusive queue (SSE forwarding)
+each work queue → tiered retry queues (30s/2m/10m TTL), then q.parking
 ```
+
+> **Phase 1 interim (D45):** until the slicer lands, `meeting.uploaded` binds
+> to `q.transcriber` (single-shot transcription, prefetch 1). The topology is
+> declared as code in `api/src/queue/topology.ts` and mirrored exactly in
+> `workers/scribeflow_workers/topology.py`; both sides assert it on connect.
+>
+> **Retry mechanics (D43):** the worker framework republishes a failed message
+> to the retry tier matching its `x-attempts` header and acks the original;
+> retry queues dead-letter back to the work queue by name via the default
+> exchange. After 4 total attempts the message is parked with error headers
+> and the worker's exhausted-hook marks the meeting failed.
 
 - **Idempotency:** every job has a deterministic ID (`{meeting_id}:{stage}:{chunk_idx}`);
   workers upsert results keyed on it, so redelivery is harmless.

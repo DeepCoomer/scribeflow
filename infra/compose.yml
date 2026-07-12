@@ -75,6 +75,30 @@ services:
         limits:
           memory: 512m
 
+  # Phase 1 pipeline worker (tickets 1.2–1.4). 1.5 GB is the whole "Python
+  # workers" line in the RAM budget — later stages (slicer, stitcher,
+  # extractor) share this allowance as more services on the same image.
+  transcriber:
+    build:
+      context: ../workers
+      dockerfile: Dockerfile
+    <<: *restart
+    env_file: ../workers/.env
+    environment:
+      # Service-network addresses override whatever localhost values are in
+      # workers/.env (same pattern as the api service above).
+      DATABASE_URL: postgres://${POSTGRES_USER:-scribeflow}:${POSTGRES_PASSWORD:-scribeflow}@postgres:5432/${POSTGRES_DB:-scribeflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-scribeflow}:${RABBITMQ_PASSWORD:-scribeflow}@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+
   # Public ingress (D39): Caddy terminates TLS with automatic Let's Encrypt
   # certs and proxies to the api container. VM-only — don't start this
   # locally (it binds 80/443 and would try to obtain real certificates).

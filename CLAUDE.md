@@ -6,10 +6,11 @@ Google Meet calls, an async pipeline transcribes (Groq Whisper) + diarizes
 dashboard + approval-gated email), and an agent layer provides RAG chat over
 meeting history, follow-up drafts, and action-item nudges.
 
-**Status: Phase 0 complete** (monorepo, compose stack, schema, API skeleton with
-auth + tenant middleware). Next: Phase 1 per `docs/plan.md`. The design in `docs/`
-is authoritative — read the relevant doc before implementing, and update it when
-reality diverges.
+**Status: Phase 1 code complete** (upload→R2→queue→transcribe→SSE→viewer;
+tickets 1.1–1.6). Remaining in Phase 1: the manual go-live steps 1.7 (Vercel)
+and 1.8 (Oracle VM + DNS). Next: Phase 2 per `docs/plan.md`. The design in
+`docs/` is authoritative — read the relevant doc before implementing, and
+update it when reality diverges.
 
 ## Read this first, per task
 

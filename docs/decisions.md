@@ -236,6 +236,37 @@ TLS. Root directory `web/`, framework preset Vite. _Rejected:_ Cloudflare Pages 
 functionally equivalent, but choosing it forced DNS onto Cloudflare, which was
 the entire justification for the tunnel (D27).
 
+**D43 — Retry ladder via explicit tiered retry queues, not DLX nack chains.**
+A failed message is republished by the worker framework to
+`q.<worker>.retry.{30s|2m|10m}` (picked from the `x-attempts` header it carries)
+and the original is acked; each retry queue has a message TTL and dead-letters
+back to the work queue **by name through the default exchange**, so Phase 2 can
+rebind routing keys without touching the retry path. After 4 total attempts the
+message lands in `q.parking` with error-context headers, and a worker hook (e.g.
+"mark the meeting failed") runs first. The work queue's own DLX also points at
+the first retry tier as a safety net for bare nacks. _Rejected:_ pure
+DLX/TTL-chain retries (can't pick the tier per attempt count — RabbitMQ's
+x-death accounting is famously subtle) and delayed-message plugin (extra broker
+plugin dependency for the same behavior).
+
+**D44 — SSE streams authenticate via `?token=` query parameter.**
+`EventSource` cannot set an `Authorization` header. The regular JWT rides as a
+query parameter on `/meetings/:id/events` only, verified with the same secret,
+and the stream is scoped by the token's tenant. Accepted trade-off: tokens can
+appear in access logs — acceptable for v1 with 7-day tokens over TLS; ticket 7.2
+(hardening) can move to short-lived stream tokens if needed. _Rejected:_
+cookies (CSRF surface + cross-origin dashboard), `fetch`-based streaming client
+(hand-rolling EventSource's reconnect for no security win in v1).
+
+**D45 — Phase 1 binds `meeting.uploaded` to `q.transcriber` (single-shot);
+the slicer takes over the binding in Phase 2.**
+Ticket 1.4 is deliberately unchunked — the racing engine is Phase 2's hard
+core, and a working upload→transcript path shouldn't wait for it. The
+single-shot worker already writes chunk_idx 0 with an offset shift of 0, so
+the Phase 2 migration is a rebind plus a slicer, not a rewrite. The topology
+constants are code (api/src/queue/topology.ts ↔ workers/…/topology.py) and
+both sides assert them, so the rebind is one PR touching both mirrors.
+
 ## Meet bot
 
 **D30 — Browser-automation bot (Playwright + Chromium + Xvfb + PulseAudio in

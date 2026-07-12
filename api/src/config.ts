@@ -1,6 +1,13 @@
 import "dotenv/config";
 import { z } from "zod";
 
+// .env files express "unset" as `VAR=` (empty string), which would fail
+// stricter validators like .url() — normalize to undefined first.
+const optionalUrl = z.preprocess(
+  (v) => (v === "" ? undefined : v),
+  z.string().url().optional(),
+);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -8,7 +15,21 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16),
   GOOGLE_OAUTH_CLIENT_ID: z.string().optional(),
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().optional(),
-  GOOGLE_OAUTH_CALLBACK_URL: z.string().url().optional(),
+  GOOGLE_OAUTH_CALLBACK_URL: optionalUrl,
+  RABBITMQ_URL: z.string().default("amqp://scribeflow:scribeflow@localhost:5672"),
+  // R2 credentials are optional so the API can boot without object storage
+  // (health checks, auth-only work); the upload endpoints 503 until they're
+  // set. R2_ENDPOINT overrides the derived Cloudflare endpoint for tests /
+  // S3-compatible stand-ins.
+  R2_ACCOUNT_ID: z.string().optional(),
+  R2_ACCESS_KEY_ID: z.string().optional(),
+  R2_SECRET_ACCESS_KEY: z.string().optional(),
+  R2_BUCKET: z.string().default("scribeflow"),
+  R2_ENDPOINT: optionalUrl,
+  UPLOAD_URL_TTL_S: z.coerce.number().int().positive().default(900),
+  // Comma-separated allowed browser origins (the Vite dev server locally,
+  // the Vercel dashboard in production).
+  CORS_ORIGINS: z.string().default("http://localhost:5173"),
 });
 
 export type Env = z.infer<typeof envSchema>;

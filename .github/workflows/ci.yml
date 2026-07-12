@@ -21,9 +21,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      rabbitmq:
+        image: rabbitmq:4-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: scribeflow
+          RABBITMQ_DEFAULT_PASS: scribeflow
+        ports: ["5672:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       DATABASE_URL: postgres://scribeflow:scribeflow@localhost:5432/scribeflow
       JWT_SECRET: ci-test-secret-not-for-prod
+      RABBITMQ_URL: amqp://scribeflow:scribeflow@localhost:5672
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +72,4 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run mypy .
-        continue-on-error: true # no workers exist yet (Phase 1); flip on once they land
       - run: uv run pytest
-        continue-on-error: true # same — placeholder until Phase 1 tickets add tests
