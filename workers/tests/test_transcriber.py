@@ -105,10 +105,22 @@ def db_calls(monkeypatch: pytest.MonkeyPatch) -> DbCalls:
     return calls
 
 
-def make_deps() -> transcriber.Deps:
+class FakeConn:
+    """Stands in for the one long-lived psycopg connection reused across a
+    worker process's whole lifetime — real enough to catch "forgot to roll
+    back on failure," which would otherwise poison every later job."""
+
+    def __init__(self) -> None:
+        self.rollback_calls = 0
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
+def make_deps(conn: Any = None) -> transcriber.Deps:
     return transcriber.Deps(
         settings=Settings(),
-        conn=object(),
+        conn=conn if conn is not None else FakeConn(),
         backend=FakeBackend(parse_verbose_json(FIXTURE)),
         r2_client=object(),
         rate_limited=False,
@@ -172,3 +184,64 @@ def test_backend_failure_marks_job_failed_and_reraises(db_calls: DbCalls) -> Non
     with pytest.raises(RuntimeError):
         transcriber.handle_meeting_uploaded(payload(), FakeCtx(), deps)
     assert db_calls.failed and db_calls.failed[0][0] == f"{MEETING}:transcribe:0"
+
+
+def test_any_failure_rolls_back_the_shared_connection(db_calls: DbCalls) -> None:
+    """Regression test: deps.conn is one connection reused for the whole
+    worker process. Without an unconditional rollback on failure, a poisoned
+    (aborted) transaction silently breaks every job after this one — no
+    error, just claim_job failing forever with nothing written anywhere."""
+    conn = FakeConn()
+    deps = make_deps(conn=conn)
+
+    class Boom:
+        def transcribe(self, _p: Path) -> list[Segment]:
+            raise RuntimeError("groq 500")
+
+    deps.backend = Boom()
+    with pytest.raises(RuntimeError):
+        transcriber.handle_meeting_uploaded(payload(), FakeCtx(), deps)
+    assert conn.rollback_calls == 1
+
+
+def test_claim_job_failure_still_rolls_back(
+    db_calls: DbCalls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers the specific failure mode that caused the original bug: an
+    exception thrown by claim_job itself (before any transition/status
+    write), which previously propagated straight past any rollback."""
+    conn = FakeConn()
+    deps = make_deps(conn=conn)
+
+    def boom_claim(*_args: Any, **_kwargs: Any) -> bool:
+        raise RuntimeError("connection already aborted")
+
+    monkeypatch.setattr(db_module, "claim_job", boom_claim)
+    with pytest.raises(RuntimeError):
+        transcriber.handle_meeting_uploaded(payload(), FakeCtx(), deps)
+    assert conn.rollback_calls == 1
+
+
+def test_worker_survives_a_failed_job_followed_by_a_good_one(
+    db_calls: DbCalls,
+) -> None:
+    """End-to-end proof the fix actually matters: on the same shared
+    connection, a failed job must not prevent the next job from succeeding."""
+    conn = FakeConn()
+    deps = make_deps(conn=conn)
+
+    class Boom:
+        def transcribe(self, _p: Path) -> list[Segment]:
+            raise RuntimeError("groq 500")
+
+    deps.backend = Boom()
+    with pytest.raises(RuntimeError):
+        transcriber.handle_meeting_uploaded(payload(), FakeCtx(), deps)
+
+    # Same conn, same deps, the next job on this queue — this must not also
+    # fail just because the previous one did.
+    db_calls.claim_result = True
+    deps.backend = FakeBackend(parse_verbose_json(FIXTURE))
+    ctx = FakeCtx()
+    transcriber.handle_meeting_uploaded(payload(), ctx, deps)
+    assert ctx.events[-1].status == "done"

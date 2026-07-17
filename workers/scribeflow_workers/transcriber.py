@@ -53,6 +53,20 @@ def handle_meeting_uploaded(
         raise PermanentError(f"invalid meeting.uploaded message: {err}") from err
 
     key = job_key(msg.meeting_id)
+    try:
+        _run(msg, ctx, deps, key)
+    except Exception:
+        # deps.conn is one connection reused for this worker process's whole
+        # lifetime (db.connect() runs once in main()). psycopg does not
+        # auto-rollback on a Python exception — without this, any failed
+        # statement (claim_job included) leaves the transaction aborted, and
+        # every subsequent job on this process fails at its very first
+        # query forever, with nothing written to the jobs table to show it.
+        deps.conn.rollback()
+        raise
+
+
+def _run(msg: MeetingUploadedV1, ctx: JobContext, deps: Deps, key: str) -> None:
     if not db.claim_job(deps.conn, msg.tenant_id, msg.meeting_id, key, STAGE):
         log.info("job.skipped_already_done", job_key=key)
         return

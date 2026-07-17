@@ -10,6 +10,7 @@ import tenantPlugin from "./plugins/tenant.js";
 import queuePlugin from "./plugins/queue.js";
 import eventsPlugin from "./plugins/events.js";
 import { createR2 } from "./lib/r2.js";
+import { parseCorsOrigins } from "./lib/cors.js";
 import healthRoutes from "./routes/health.js";
 import authRoutes from "./routes/auth.js";
 import meRoutes from "./routes/me.js";
@@ -33,7 +34,7 @@ export async function buildApp(env: Env) {
   await app.register(configPlugin, env);
   await app.register(sensible);
   await app.register(cors, {
-    origin: env.CORS_ORIGINS.split(",").map((o) => o.trim()),
+    origin: parseCorsOrigins(env.CORS_ORIGINS),
   });
   await app.register(dbPlugin);
   await app.register(authPlugin);

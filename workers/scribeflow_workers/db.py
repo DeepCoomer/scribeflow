@@ -40,7 +40,13 @@ def claim_job(
             VALUES (%s, %s, %s, %s, 'running', 1)
             ON CONFLICT (job_key) DO UPDATE
               SET attempts = jobs.attempts + 1,
-                  status = CASE WHEN jobs.status = 'done' THEN 'done' ELSE 'running' END,
+                  -- INSERT's 'running' above is cast implicitly (Postgres
+                  -- infers the target column type for a plain VALUES
+                  -- literal); a CASE expression's branches don't get that
+                  -- inference — both sides resolve to text, so assigning
+                  -- the result to the job_status enum needs an explicit
+                  -- cast or it's a DatatypeMismatch at execute time.
+                  status = (CASE WHEN jobs.status = 'done' THEN 'done' ELSE 'running' END)::job_status,
                   updated_at = now()
             RETURNING status
             """,

@@ -22,7 +22,17 @@ export function App() {
   const [authed, setAuthed] = useState(getToken() !== null);
 
   if (!authed || route === "#/login") {
-    return <AuthPage onAuthed={() => setAuthed(true)} />;
+    return (
+      <AuthPage
+        onAuthed={() => {
+          // A prior 401 (api.ts) can strand the hash on #/login; without
+          // clearing it here, a successful login re-renders straight back
+          // into this same gate since the hash never changes on its own.
+          if (window.location.hash === "#/login") window.location.hash = "#/";
+          setAuthed(true);
+        }}
+      />
+    );
   }
 
   const meetingMatch = route.match(/^#\/meetings\/([0-9a-f-]{36})$/);

@@ -195,10 +195,14 @@ describe("job status SSE (1.6)", () => {
     const controller = new AbortController();
     const res = await fetch(
       `http://127.0.0.1:${address.port}/meetings/${meetingId}/events?token=${token}`,
-      { signal: controller.signal },
+      { signal: controller.signal, headers: { origin: "http://localhost:5173" } },
     );
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
+    // reply.hijack() bypasses @fastify/cors's normal onSend hook entirely
+    // (that's the whole point of hijacking), so this route sets the CORS
+    // header itself — regression coverage for that gap.
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
 
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();

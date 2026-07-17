@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AuthContext } from "../types/fastify.js";
 import {
   createMeeting,
@@ -11,6 +11,7 @@ import {
 import { listSegments } from "../db/repositories/segments.js";
 import { ROUTING_KEYS } from "../queue/topology.js";
 import type { MeetingUploadedV1, StatusEventV1 } from "../queue/messages.js";
+import { parseCorsOrigins } from "../lib/cors.js";
 
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // architecture.md data-flow cap
 
@@ -179,7 +180,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
     const meeting = await findMeetingById(app.db, auth.tenantId, id);
     if (!meeting) return reply.notFound();
 
-    startSse(reply);
+    startSse(reply, request, parseCorsOrigins(app.config.CORS_ORIGINS));
     // Snapshot first so a client that connects after a transition doesn't
     // wait on an event that already happened.
     sendSse(reply, "status", {
@@ -208,14 +209,28 @@ export default async function meetingRoutes(app: FastifyInstance) {
   });
 }
 
-function startSse(reply: FastifyReply) {
+// reply.hijack() takes full control of the raw response, which means
+// @fastify/cors's onSend hook never runs for this route (it only patches
+// normal Fastify replies) — so the CORS header has to be set by hand here,
+// mirroring the same allow-list app.ts hands to the cors plugin.
+function startSse(
+  reply: FastifyReply,
+  request: FastifyRequest,
+  allowedOrigins: string[],
+) {
   reply.hijack();
-  reply.raw.writeHead(200, {
+  const origin = request.headers.origin;
+  const headers: Record<string, string> = {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
     connection: "keep-alive",
     "x-accel-buffering": "no",
-  });
+  };
+  if (origin && allowedOrigins.includes(origin)) {
+    headers["access-control-allow-origin"] = origin;
+    headers["vary"] = "Origin";
+  }
+  reply.raw.writeHead(200, headers);
   reply.raw.write(":connected\n\n");
 }
 
