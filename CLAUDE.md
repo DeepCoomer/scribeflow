@@ -6,10 +6,14 @@ Google Meet calls, an async pipeline transcribes (Groq Whisper) + diarizes
 dashboard + approval-gated email), and an agent layer provides RAG chat over
 meeting history, follow-up drafts, and action-item nudges.
 
-**Status: Phase 1 code complete** (upload→R2→queue→transcribe→SSE→viewer;
-tickets 1.1–1.6). Remaining in Phase 1: the manual go-live steps 1.7 (Vercel)
-and 1.8 (Oracle VM + DNS). Next: Phase 2 per `docs/plan.md`. The design in
-`docs/` is authoritative — read the relevant doc before implementing, and
+**Status: Phase 1 done and verified end-to-end** (upload→R2→queue→transcribe→
+SSE→viewer; tickets 1.1–1.6, tested with real uploads through the real
+pipeline). **1.7 (Vercel) is live** at `scribeflow.deepcoomer.dev`. **1.8
+(Oracle VM) is blocked** on Always Free Ampere capacity in `AP-MUMBAI-1`
+(single-AD region, no alternate AD to retry) — see
+`docs/oracle-vm-setup.md` for the exact config to use once capacity frees
+up. Next: Phase 2 per `docs/plan.md`, starting with the 2.1 design doc. The
+design in `docs/` is authoritative — read the relevant doc before implementing, and
 update it when reality diverges.
 
 ## Read this first, per task

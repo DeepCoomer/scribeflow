@@ -60,11 +60,16 @@ loops on the same bug across sessions.
 
 ### Phase 1 — Upload → transcript MVP (no bot yet)
 
-_Status: 1.1–1.6 **done** (July 2026). 1.7/1.8 (manual go-live) remain — the
-Oracle account signup should start now, capacity permitting. Implementation
-notes: retry ladder D43, SSE token auth D44, interim `meeting.uploaded` →
-`q.transcriber` binding D45; the D22 `TRANSCRIBE_BACKEND=groq|local` switch
-shipped with 1.4 as planned._
+_Status: 1.1–1.6 **done and verified end-to-end** (July 2026), including 4
+bugs found and fixed via live testing (login-redirect hash trap, SSE CORS
+bypass on the hijacked response, worker connection-poisoning on failure,
+`claim_job` enum-cast mismatch). **1.7 done** — live at
+`scribeflow.deepcoomer.dev`. **1.8 blocked** on Always Free Ampere capacity
+in `AP-MUMBAI-1` (account signup itself is resolved; see
+`docs/oracle-vm-setup.md` for the exact config queued up for whenever
+capacity frees). Implementation notes: retry ladder D43, SSE token auth
+D44, interim `meeting.uploaded` → `q.transcriber` binding D45; the D22
+`TRANSCRIBE_BACKEND=groq|local` switch shipped with 1.4 as planned._
 
 | #   | Ticket                                                                                                                                                                                                                                                                                                       | Model           |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------- |

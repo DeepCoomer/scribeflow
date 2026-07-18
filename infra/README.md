@@ -45,6 +45,11 @@ capacity can take days of retries.
 
 ### API on the Oracle VM (ticket 1.8, end of Phase 1)
 
+See [docs/oracle-vm-setup.md](../docs/oracle-vm-setup.md) for the exact
+instance configuration used, why each setting was chosen, and the signup /
+capacity gotchas hit while provisioning — read that first if setting this
+up again.
+
 1. Create the Ampere A1 instance (2 OCPU / 12 GB, Ubuntu 24.04 ARM) in the
    Oracle Cloud console. Always Free capacity errors in a region are common —
    retry, or try a different Availability Domain.
