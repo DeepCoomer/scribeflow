@@ -12,7 +12,9 @@ pipeline). **1.7 (Vercel) is live** at `scribeflow.deepcoomer.dev`. **1.8
 (Oracle VM) is blocked** on Always Free Ampere capacity in `AP-MUMBAI-1`
 (single-AD region, no alternate AD to retry) — see
 `docs/oracle-vm-setup.md` for the exact config to use once capacity frees
-up. Next: Phase 2 per `docs/plan.md`, starting with the 2.1 design doc. The
+up. **2.1 (racing-engine spec) is done** — edge cases specified in
+`docs/architecture.md` + D46–D50. Next: 2.2 (slicer, Opus), one ticket per
+session per `docs/plan.md`. The
 design in `docs/` is authoritative — read the relevant doc before implementing, and
 update it when reality diverges.
 

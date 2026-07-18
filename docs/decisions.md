@@ -112,6 +112,74 @@ Chunk-relative time leaking downstream is the subtlest bug class in this system;
 converting once at write time (shift by `offset_s`) means nothing downstream ever
 reasons about offsets.
 
+**D46 — Chunk count `n = max(1, ceil((D − 10) / 290))`; final chunk runs to
+end-of-file; a would-be final chunk under 30 s is absorbed into its predecessor.**
+The formula guarantees full coverage with the D10 overlap; running the last
+chunk open-ended (`-ss` only) avoids off-by-one truncation at the file tail; the
+30 s absorption floor avoids paying a whole Groq request + stitch boundary for
+seconds of audio (the absorbed chunk tops out at 330 s — nowhere near the
+100 MB/request cap as FLAC). `D ≤ 300 s` degenerates to one chunk with
+`offset_s = 0`, which is exactly the Phase 1 single-shot shape (D45).
+_Rejected:_ fixed `n = ceil(D/290)` (emits a near-empty final chunk that is
+mostly overlap), padding the tail with silence (invites Whisper hallucinations,
+D48).
+
+**D47 — Chunks are always re-encoded to 16 kHz mono FLAC; never stream copy.
+The slicer uploads chunk objects to R2 and jobs reference the chunk key.**
+Decode→resample→encode gives sample-exact cut points, so `offset_s` is exact —
+stream copy cuts at packet granularity and can drift from the requested `-ss`,
+which is precisely the offset-error class D16 exists to kill. Re-encoding also
+normalizes every source container into one uniform Groq input. Chunk objects
+live under `tenant/{t}/meeting/{m}/chunks/{idx}.flac` (covered by the 30-day
+lifecycle rule — no active cleanup). This supersedes the earlier
+"stream copy when the format allows it" wording in architecture.md.
+_Rejected:_ stream copy (offset drift), byte-range downloads of the original
+(ranges of compressed containers aren't independently decodable).
+
+**D48 — Hallucination filter in the chunk transcriber: drop a segment when
+`no_speech_prob > 0.6 ∧ avg_logprob < −1.0`, or when `compression_ratio > 2.4`;
+an empty chunk is a success.**
+These are Whisper's own published heuristics for non-speech and repetition
+hallucination; filtering before storage means the stitcher never sees phantom
+edge segments. A chunk with zero surviving segments still completes fan-in, and
+an all-silent meeting finalizes `done` with an empty transcript (`duration_s`
+from ffprobe, not segment ends). Requires `parse_verbose_json` to carry the
+three confidence fields it currently discards — an additive internal-model
+change, not a queue-contract change. _Rejected:_ filtering at the stitcher
+(every consumer of `transcript_segments` before stitch would see hallucinations)
+and energy-based VAD pre-filtering (a second inference pass to save requests we
+don't need to save).
+
+**D49 — Chunk retry exhaustion: terminal `exhausted` job state + fan-in still
+increments; the stitcher derives gap intervals into `transcript_gaps`.**
+The exhausted-hook's conditional transition
+(`SET status = 'exhausted' WHERE … status <> 'exhausted'`) is the exactly-once
+guard for its `chunks_done` increment, so fan-in always closes and a failed
+chunk can never wedge a meeting in `transcribing`. The stitcher — not the
+worker — computes uncovered intervals (`[0, D]` minus succeeded chunks'
+coverage) into a `transcript_gaps` table, and owns the terminal status: any
+gap → `partial`, zero successes → `failed`, else `done`. _Rejected:_ sentinel
+gap rows inside `transcript_segments` (fake segments poison every downstream
+consumer — search, embeddings, extraction) and having the exhausted-hook mark
+the meeting `partial` directly (races the stitcher for the status; two writers
+of a terminal state is how meetings end up `partial` after a successful
+stitch).
+
+**D50 — Chunk completion is one transaction (segments + job→done + counter),
+and the `claim_job` skip path re-checks fan-in.**
+Bundling `replace_segments`, the conditional `jobs → 'done'` transition, and
+the counter increment into a single commit makes the increment exactly-once
+under redelivery (refines D14, which specified only the atomic statement). The
+crash window _after_ commit but _before_ publishing `meeting.stitch` is closed
+on the redelivery path: a worker that finds its job already done re-reads the
+counters and republishes `meeting.stitch` if fan-in is closed while the
+meeting still says `transcribing` (harmless — the stitcher claims its own
+job). Diarization exhaustion sets `diarization_done = true` with the error
+recorded, so the stitch trigger is never blocked forever; the merge proceeds
+speakerless and forces `partial`. _Rejected:_ a periodic sweeper that finds
+wedged meetings (a second code path doing the same decision on a timer — the
+redelivery we already get for free is the sweep).
+
 ## Data layer
 
 **D17 — Two databases: Postgres for state, ClickHouse for analytics.**

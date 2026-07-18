@@ -1,6 +1,6 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-12_
+_Last updated: 2026-07-18_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
@@ -88,6 +88,13 @@ D44, interim `meeting.uploaded` → `q.transcriber` binding D45; the D22
 > since Always Free capacity can take days of retries.
 
 ### Phase 2 — The racing engine + diarization (the hard core)
+
+_Status: 2.1 **done** (2026-07-18) — the racing-engine edge cases are now fully
+specified in architecture.md ("Slicing" through "Fan-in mechanics") with
+decisions D46–D50 (chunk-count formula, always-FLAC re-encode + chunk objects
+in R2, hallucination filter, `exhausted` job state + `transcript_gaps`,
+exactly-once fan-in + crash-window closures). Next: 2.2 (slicer, Opus), one
+ticket per session._
 
 | #   | Ticket                                                                                                                                                              | Model                            |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
