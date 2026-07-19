@@ -14,11 +14,13 @@ pipeline). **1.7 (Vercel) is live** at `scribeflow.deepcoomer.dev`. **1.8
 `docs/oracle-vm-setup.md` for the exact config to use once capacity frees
 up. **2.1 (racing-engine spec) is done** — edge cases specified in
 `docs/architecture.md` + D46–D50. **2.2–2.5 (slicer, chunk transcriber,
-stitcher, diarizer) are done** — see `docs/plan.md`'s Phase 2 status for
-what was verified and the model-assignment deviation. **2.6's design half
-is done** — merge spec in `docs/architecture.md` ("Speaker–transcript
-merge") + D55–D57, with the impl scope list for Opus. Next: 2.6 impl
-(Opus), per `docs/plan.md`. The
+stitcher, diarizer) are done**, and so are **2.6 (speaker–transcript merge,
+design in `docs/architecture.md` + D55–D57, impl adds `merge.py` +
+`meeting_speakers`), 2.7 (chaos tests, `test_chaos.py`), and 2.8 (pipeline
+review — 3 bugs found and fixed, D58)** — see `docs/plan.md`'s Phase 2
+status for what was verified and the model-assignment deviations (2.6 impl/
+2.7/2.8 ran on Sonnet by request). **Phase 2 is complete.** Next: Phase 3,
+ticket 3.1 (extraction worker, Opus), per `docs/plan.md`. The
 design in `docs/` is authoritative — read the relevant doc before implementing, and
 update it when reality diverges.
 

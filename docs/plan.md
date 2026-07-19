@@ -1,6 +1,6 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-07-19 (Phase 2 complete)_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
@@ -103,16 +103,36 @@ to the stitch dedup rule). Deviation from the model-strategy table: 2.2–2.5
 were run as **Sonnet** in one combined session by explicit user request,
 not Opus/one-ticket-per-session as originally planned — noted here rather
 than changing the table, since Opus stays the default for this shape of
-ticket going forward. **2.6 design half done** (2026-07-19) — the
-speaker–transcript merge is specified in architecture.md
-("Speaker–transcript merge") with D55–D57: the merge runs inside the
-stitcher's finalize transaction; segments store the raw diarization label
-with human names in a new `meeting_speakers` table (calendar attendees are
-rename candidates only, never auto-assigned); the interruption rule is
-defined but materialized only in 4.1, with `speaker_turns` retained
-post-merge. Next: 2.6 impl (Opus — scope list is in the architecture.md
-merge section), 2.7 (chaos tests, Opus), 2.8 (pipeline code review, Opus,
-D41)._
+ticket going forward. **2.6 done** (2026-07-19, design + impl both
+2026-07-19) — design half specified the speaker–transcript merge in
+architecture.md ("Speaker–transcript merge") with D55–D57 (merge runs
+inside the stitcher's finalize transaction; segments store the raw
+diarization label with human names in a new `meeting_speakers` table,
+calendar attendees as rename candidates only; interruption rule defined but
+materialized only in 4.1, `speaker_turns` retained post-merge); impl adds
+`merge.py`, the `meeting_speakers` migration/repository/rename endpoint, and
+viewer display-name + inline-rename UI, with unit + integration + API
+tests. **2.7 done** — chaos tests (`test_chaos.py`) wire the real
+transcriber/diarizer/stitcher handlers to one shared in-memory fake DB
+across multiple invocations to exercise a worker crashing mid-chunk before
+any write, a duplicate delivery after commit, and out-of-order chunk/
+diarization completion — all pass, confirming the D14/D50/D11 exactly-once
+and determinism invariants hold under those conditions. **2.8 done** —
+full-pipeline review found and fixed three issues, logged as D58: the
+slicer's exhausted-hook could clobber a correct `done`/`partial` status the
+stitcher had already set (a retry's earlier per-attempt chunk publishes can
+independently finish the pipeline before the slicer job itself gives up),
+fixed via `db.fail_meeting_if_not_terminal`; the diarizer's redelivery
+recheck could republish `meeting.stitch` after the meeting was already
+stitched (harmless but noisy), now guarded like the transcriber's analogous
+path; and the 2.6 speaker-rename endpoint accepted a `userId` without a
+tenant check (invariant 2), now gated by `findUserById`. **Phase 2 is
+complete.** Deviation from the model-strategy table: 2.6's implementation
+half, 2.7, and 2.8 were all run as **Sonnet** by explicit user request
+(2.6's design half stayed on Fable as planned) — noted here rather than
+changing the table, since Opus/Fable stay the documented defaults for this
+shape of ticket going forward. Next: Phase 3 (3.1, intelligence-layer
+extraction worker, Opus)._
 
 | #   | Ticket                                                                                                                                                              | Model                            |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
@@ -209,6 +229,11 @@ from Opus to Sonnet. The remaining Fable tickets are all spec-writing (2.1, 2.6
 design half, 5.1), the security review (7.1), and the stuck-bot escalation
 reserve (5.6) — zero scheduled implementation (D41). See
 [model-strategy.md](model-strategy.md).
+
+**Phase 2 status:** 2.1–2.8 all done (2026-07-18–19). Racing engine +
+diarization + speaker merge implemented, chaos-tested, and reviewed; three
+bugs found in the 2.8 review were fixed in the same session (D58) rather
+than carried into Phase 3.
 
 Every architectural and product decision behind these tickets is logged with
 reasoning and rejected alternatives in [decisions.md](decisions.md) — cite entries
