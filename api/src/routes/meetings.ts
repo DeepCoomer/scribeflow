@@ -9,6 +9,7 @@ import {
   markUploaded,
 } from "../db/repositories/meetings.js";
 import { listSegments } from "../db/repositories/segments.js";
+import { listSpeakers, renameSpeaker } from "../db/repositories/speakers.js";
 import { ROUTING_KEYS } from "../queue/topology.js";
 import type { MeetingUploadedV1, StatusEventV1 } from "../queue/messages.js";
 import { parseCorsOrigins } from "../lib/cors.js";
@@ -44,6 +45,13 @@ const uploadedSchema = z.object({
 });
 
 const idParamSchema = z.object({ id: z.string().uuid() });
+
+const speakerParamSchema = z.object({ id: z.string().uuid(), label: z.string().min(1) });
+
+const renameSpeakerSchema = z.object({
+  displayName: z.string().min(1).max(100),
+  userId: z.string().uuid().nullable().optional(),
+});
 
 function meetingView(m: NonNullable<Awaited<ReturnType<typeof findMeetingById>>>) {
   return {
@@ -159,8 +167,32 @@ export default async function meetingRoutes(app: FastifyInstance) {
     const { tenantId } = request.auth!;
     const meeting = await findMeetingById(app.db, tenantId, id);
     if (!meeting) return reply.notFound();
-    const segments = await listSegments(app.db, tenantId, id);
-    return { meeting: meetingView(meeting), segments };
+    const [segments, speakers] = await Promise.all([
+      listSegments(app.db, tenantId, id),
+      listSpeakers(app.db, tenantId, id),
+    ]);
+    return { meeting: meetingView(meeting), segments, speakers };
+  });
+
+  // Ticket 2.6 (D56): rename a diarized speaker for this meeting. Calendar
+  // attendees are a candidate list for this input (Phase 6), never an
+  // auto-assignment — the stitcher only ever seeds a "Speaker N" default.
+  app.patch("/meetings/:id/speakers/:label", protectedOpts, async (request, reply) => {
+    const { id, label } = speakerParamSchema.parse(request.params);
+    const body = renameSpeakerSchema.parse(request.body);
+    const { tenantId } = request.auth!;
+
+    const updated = await renameSpeaker(app.db, tenantId, id, label, {
+      displayName: body.displayName,
+      userId: body.userId,
+    });
+    if (!updated) return reply.notFound();
+    return {
+      speakerLabel: updated.speakerLabel,
+      displayName: updated.displayName,
+      userId: updated.userId,
+      source: updated.source,
+    };
   });
 
   // Ticket 1.6 — live job status over SSE. EventSource cannot set an

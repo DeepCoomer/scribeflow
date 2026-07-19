@@ -30,6 +30,15 @@ export type Segment = {
   text: string;
 };
 
+// Ticket 2.6: transcript_segments.speaker is the raw diarization label
+// (SPEAKER_00, ...); this is the label -> human-name map (D56).
+export type SpeakerInfo = {
+  speakerLabel: string;
+  displayName: string;
+  userId: string | null;
+  source: "default" | "user" | "calendar" | "voiceprint";
+};
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -96,7 +105,15 @@ export const api = {
     }),
 
   transcript: (id: string) =>
-    request<{ meeting: Meeting; segments: Segment[] }>(`/meetings/${id}/transcript`),
+    request<{ meeting: Meeting; segments: Segment[]; speakers: SpeakerInfo[] }>(
+      `/meetings/${id}/transcript`,
+    ),
+
+  renameSpeaker: (meetingId: string, speakerLabel: string, displayName: string) =>
+    request<SpeakerInfo>(
+      `/meetings/${meetingId}/speakers/${encodeURIComponent(speakerLabel)}`,
+      { method: "PATCH", body: JSON.stringify({ displayName }) },
+    ),
 };
 
 // The upload itself goes browser → R2 with the presigned URL; the API never

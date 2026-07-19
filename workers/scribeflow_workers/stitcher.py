@@ -1,7 +1,10 @@
-"""Stitcher (ticket 2.4): meeting.stitch -> dedupe chunk overlaps -> mark
-gaps for any chunk that exhausted retries -> finalize the meeting's terminal
-status. Fan-in (D50) guarantees every chunk_idx has reached a terminal job
-state ('done' or 'exhausted') by the time this runs.
+"""Stitcher (tickets 2.4 + 2.6): meeting.stitch -> dedupe chunk overlaps ->
+assign speakers to the surviving segments (D55) -> mark gaps for any chunk
+that exhausted retries -> finalize the meeting's terminal status. Fan-in
+(D50) guarantees every chunk_idx has reached a terminal job state ('done' or
+'exhausted') by the time this runs, and both fan-in branches (chunks +
+diarization) are done, so speaker_turns is fully populated (or empty, if
+diarization itself exhausted).
 
 Run: python -m scribeflow_workers.stitcher
 """
@@ -17,6 +20,7 @@ from .config import Settings, get_settings
 from .db import StitchSegmentRow
 from .framework import JobContext, PermanentError, Worker
 from .logging import configure_logging, get_logger
+from .merge import SpeakerTurn, merge_speakers
 from .messages import MeetingStatus, MeetingStitchV1, StatusEventV1
 from .topology import STITCHER_QUEUE
 
@@ -149,6 +153,18 @@ def _run(msg: MeetingStitchV1, ctx: JobContext, deps: Deps, key: str) -> None:
         kept = _dedupe_cross_cut(segments, kept, present, offset_by_idx)
         drop_ids = [seg.id for seg in segments if seg.id not in kept]
 
+        # 2.6 (D55): assign speakers only to the segments that survive
+        # dedup — a dropped segment's speaker is moot, and the merge must
+        # run after side assignment/dedup decide the final segment set.
+        kept_segments = [seg for seg in segments if seg.id in kept]
+        turns = [
+            SpeakerTurn(speaker_label=label, start_s=start_s, end_s=end_s)
+            for label, start_s, end_s in db.get_speaker_turns_for_stitch(
+                deps.conn, msg.meeting_id
+            )
+        ]
+        merge_result = merge_speakers(kept_segments, turns)
+
         gaps = _compute_gaps(info.duration_s, plan, present)
 
         status: MeetingStatus
@@ -169,6 +185,8 @@ def _run(msg: MeetingStitchV1, ctx: JobContext, deps: Deps, key: str) -> None:
                 tenant_id=msg.tenant_id,
                 meeting_id=msg.meeting_id,
                 drop_segment_ids=drop_ids,
+                speaker_assignments=merge_result.assignments,
+                speaker_defaults=merge_result.default_names,
                 gaps=gaps,
                 status=status,
                 error=error,

@@ -220,9 +220,11 @@ export const transcriptGaps = pgTable("transcript_gaps", {
 
 // --- speaker_turns -----------------------------------------------------------
 // Raw pyannote output (ticket 2.5) — one row per speaker turn on the full
-// file. Ticket 2.6 reads this alongside transcript_segments to assign a
-// speaker to each segment by maximum temporal overlap (D13); nothing reads
-// speaker_turns directly before that merge runs.
+// file. The 2.6 merge (in the stitcher) reads this alongside
+// transcript_segments to assign a speaker to each segment by maximum
+// temporal overlap (D13/D55). Retained after the merge (D57): idempotent
+// re-stitching recomputes from it, and Phase 4.1's interruption metric
+// reads it too.
 
 export const speakerTurns = pgTable("speaker_turns", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -233,6 +235,41 @@ export const speakerTurns = pgTable("speaker_turns", {
   startS: doublePrecision("start_s").notNull(),
   endS: doublePrecision("end_s").notNull(),
 });
+
+// --- meeting_speakers ---------------------------------------------------------
+// Label -> human name map (ticket 2.6, D56). transcript_segments.speaker
+// keeps the raw diarization label (SPEAKER_00, ...) as a stable key; this
+// table is the only place a display name lives, so renaming a speaker is a
+// one-row update instead of a sweep over every segment. The stitcher seeds
+// one row per label it sees with a "Speaker N" default (numbered by first
+// turn start) via ON CONFLICT DO NOTHING, so a re-stitch never clobbers a
+// user's rename. No tenant_id column, same as transcript_segments — reads
+// and writes join through meetings, and repository functions still require
+// tenantId (D20).
+
+export const speakerSourceEnum = pgEnum("speaker_source", [
+  "default",
+  "user",
+  "calendar",
+  "voiceprint",
+]);
+
+export const meetingSpeakers = pgTable(
+  "meeting_speakers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    meetingId: uuid("meeting_id")
+      .notNull()
+      .references(() => meetings.id, { onDelete: "cascade" }),
+    speakerLabel: text("speaker_label").notNull(),
+    displayName: text("display_name").notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    source: speakerSourceEnum("source").notNull().default("default"),
+  },
+  (t) => [
+    uniqueIndex("meeting_speakers_meeting_label_idx").on(t.meetingId, t.speakerLabel),
+  ],
+);
 
 // --- rate_limiter_buckets ---------------------------------------------------
 // Backing row for the shared Groq token bucket (D24): workers take a Postgres

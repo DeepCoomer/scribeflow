@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import amqplib from "amqplib";
 import { loadEnv } from "../config.js";
 import { buildApp } from "../app.js";
-import { transcriptSegments } from "../db/schema.js";
+import { meetingSpeakers, transcriptSegments } from "../db/schema.js";
 import { SLICER_QUEUE } from "../queue/topology.js";
 import { meetingUploadedV1 } from "../queue/messages.js";
 
@@ -174,6 +174,89 @@ describe("transcript viewer (1.5)", () => {
     expect(res.statusCode).toBe(200);
     const { segments } = res.json();
     expect(segments.map((s: { text: string }) => s.text)).toEqual(["first", "second"]);
+  });
+});
+
+describe("speaker rename (2.6)", () => {
+  it("returns seeded speakers with the transcript and lets a user rename one", async () => {
+    const meetingId = await createMeeting();
+    await app.db.insert(transcriptSegments).values([
+      {
+        meetingId,
+        chunkIdx: 0,
+        startS: 0.0,
+        endS: 4.0,
+        text: "hello",
+        speaker: "SPEAKER_00",
+      },
+    ]);
+    await app.db
+      .insert(meetingSpeakers)
+      .values([{ meetingId, speakerLabel: "SPEAKER_00", displayName: "Speaker 1" }]);
+
+    const transcriptRes = await app.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/transcript`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(transcriptRes.statusCode).toBe(200);
+    expect(transcriptRes.json().speakers).toEqual([
+      {
+        speakerLabel: "SPEAKER_00",
+        displayName: "Speaker 1",
+        userId: null,
+        source: "default",
+      },
+    ]);
+
+    const renameRes = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/speakers/SPEAKER_00`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { displayName: "Alex" },
+    });
+    expect(renameRes.statusCode).toBe(200);
+    expect(renameRes.json()).toMatchObject({
+      speakerLabel: "SPEAKER_00",
+      displayName: "Alex",
+      source: "user",
+    });
+
+    const again = await app.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/transcript`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(again.json().speakers[0]).toMatchObject({
+      displayName: "Alex",
+      source: "user",
+    });
+  });
+
+  it("404s renaming a label with no seeded row", async () => {
+    const meetingId = await createMeeting();
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/speakers/SPEAKER_99`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { displayName: "Nobody" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("404s renaming a speaker on another tenant's meeting", async () => {
+    const meetingId = await createMeeting();
+    await app.db
+      .insert(meetingSpeakers)
+      .values([{ meetingId, speakerLabel: "SPEAKER_00", displayName: "Speaker 1" }]);
+    const other = await registerUser(app, `speaker-rename-${Date.now()}@example.com`);
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/speakers/SPEAKER_00`,
+      headers: { authorization: `Bearer ${other.token}` },
+      payload: { displayName: "Hijack" },
+    });
+    expect(res.statusCode).toBe(404);
   });
 });
 

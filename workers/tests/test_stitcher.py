@@ -130,6 +130,7 @@ class DbCalls:
         )
         self.chunk_statuses: dict[int, str] = {0: "done", 1: "done"}
         self.segments: list[StitchSegmentRow] = []
+        self.speaker_turns: list[tuple[str, float, float]] = []
         self.finalizations: list[db_module.StitchFinalization] = []
         self.completed: list[str] = []
         self.failed: list[tuple[str, str]] = []
@@ -147,6 +148,11 @@ def db_calls(monkeypatch: pytest.MonkeyPatch) -> DbCalls:
     )
     monkeypatch.setattr(
         db_module, "get_segments_for_stitch", lambda conn, m: calls.segments
+    )
+    monkeypatch.setattr(
+        db_module,
+        "get_speaker_turns_for_stitch",
+        lambda conn, m: calls.speaker_turns,
     )
 
     def fake_finalize(conn: Any, finalization: db_module.StitchFinalization) -> None:
@@ -189,8 +195,52 @@ def test_all_chunks_done_no_gaps_finalizes_done(db_calls: DbCalls) -> None:
     assert finalization.gaps == []
     assert finalization.drop_segment_ids == ["b1"]
     assert finalization.error is None
+    # No speaker_turns rows in this test: every surviving segment gets an
+    # explicit None assignment (2.6) rather than being left out.
+    assert finalization.speaker_assignments == {"a": None, "b0": None, "c": None}
+    assert finalization.speaker_defaults == {}
     assert ctx.events[0].status == "done"
     assert db_calls.completed == [f"{MEETING}:stitch:0"]
+
+
+def test_speaker_merge_assigns_max_overlap_label_to_surviving_segments(
+    db_calls: DbCalls,
+) -> None:
+    db_calls.segments = [seg("a", 0, 100.0, 110.0), seg("b1", 1, 293.0, 299.0)]
+    db_calls.speaker_turns = [
+        ("SPEAKER_00", 95.0, 105.0),  # 5s overlap with "a"
+        ("SPEAKER_01", 105.0, 115.0),  # 5s overlap with "a" -- tie -> SPEAKER_00
+        ("SPEAKER_01", 290.0, 300.0),  # fully covers "b1"
+    ]
+    ctx = FakeCtx()
+    stitcher.handle_meeting_stitch(payload(), ctx, make_deps())
+
+    (finalization,) = db_calls.finalizations
+    assert finalization.speaker_assignments == {"a": "SPEAKER_00", "b1": "SPEAKER_01"}
+    # Default names numbered by first turn start: SPEAKER_00's first turn
+    # (95.0) precedes SPEAKER_01's (105.0), so SPEAKER_00 is "Speaker 1".
+    assert finalization.speaker_defaults == {
+        "SPEAKER_00": "Speaker 1",
+        "SPEAKER_01": "Speaker 2",
+    }
+
+
+def test_dropped_segment_gets_no_speaker_assignment(db_calls: DbCalls) -> None:
+    # b1 is the cross-cut duplicate loser (same fixture as the pure dedup
+    # test above) -- it must not appear in speaker_assignments even though a
+    # turn overlaps it, since the merge only runs over the kept set.
+    db_calls.segments = [
+        seg("a", 0, 100.0, 110.0),
+        seg("b0", 0, 291.0, 297.0),
+        seg("b1", 1, 293.0, 299.0),
+        seg("c", 1, 400.0, 410.0),
+    ]
+    db_calls.speaker_turns = [("SPEAKER_00", 290.0, 300.0)]
+    stitcher.handle_meeting_stitch(payload(), FakeCtx(), make_deps())
+
+    (finalization,) = db_calls.finalizations
+    assert "b1" not in finalization.speaker_assignments
+    assert finalization.speaker_assignments["b0"] == "SPEAKER_00"
 
 
 def test_exhausted_middle_chunk_finalizes_partial_with_a_gap(db_calls: DbCalls) -> None:

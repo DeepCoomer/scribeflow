@@ -301,21 +301,49 @@ class StitchFinalization:
     tenant_id: str
     meeting_id: str
     drop_segment_ids: list[str]
+    # Kept-segment id -> diarized label (None = no overlapping turn, D55).
+    # Every kept segment gets an entry so a re-stitch overwrites a stale
+    # assignment instead of leaving it stuck.
+    speaker_assignments: dict[str, str | None]
+    # Diarized label -> "Speaker N" default (D56); seeded via ON CONFLICT DO
+    # NOTHING so it never clobbers a user's rename.
+    speaker_defaults: dict[str, str]
     gaps: list[tuple[float, float]]
     status: str
     error: str | None = None
 
 
 def finalize_stitch(conn: psycopg.Connection[Any], finalization: StitchFinalization) -> None:
-    """Deletes losing overlap segments, replaces the gap markers, and sets
-    the terminal status — one transaction, so a crash mid-stitch can't leave
-    duplicate segments or duplicate gap rows behind (re-running produces the
-    same keep/drop decision and the same gap set, D49/D11)."""
+    """Deletes losing overlap segments, assigns speakers, seeds default
+    display names, replaces the gap markers, and sets the terminal status —
+    one transaction, so a crash mid-stitch can't leave duplicate segments,
+    duplicate gap rows, or a half-speakered meeting behind (re-running
+    produces the same keep/drop/assignment decisions, D49/D11/D55)."""
     with conn.cursor() as cur:
         if finalization.drop_segment_ids:
             cur.execute(
                 "DELETE FROM transcript_segments WHERE id = ANY(%s)",
                 (finalization.drop_segment_ids,),
+            )
+        if finalization.speaker_assignments:
+            cur.executemany(
+                "UPDATE transcript_segments SET speaker = %s WHERE id = %s",
+                [
+                    (label, seg_id)
+                    for seg_id, label in finalization.speaker_assignments.items()
+                ],
+            )
+        if finalization.speaker_defaults:
+            cur.executemany(
+                """
+                INSERT INTO meeting_speakers (meeting_id, speaker_label, display_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (meeting_id, speaker_label) DO NOTHING
+                """,
+                [
+                    (finalization.meeting_id, label, name)
+                    for label, name in finalization.speaker_defaults.items()
+                ],
             )
         cur.execute(
             "DELETE FROM transcript_gaps WHERE meeting_id = %s", (finalization.meeting_id,)
@@ -346,7 +374,9 @@ def insert_speaker_turns(
     conn: psycopg.Connection[Any], meeting_id: str, turns: list[tuple[str, float, float]]
 ) -> None:
     """Replace-by-meeting (redelivery-safe, mirrors replace_segments): raw
-    pyannote turns land here for ticket 2.6's speaker merge to consume."""
+    pyannote turns land here for the stitcher's speaker merge (2.6) to
+    consume, and stay after the merge runs (D57) for idempotent re-stitching
+    and Phase 4.1's interruption metric."""
     with conn.cursor() as cur:
         cur.execute("DELETE FROM speaker_turns WHERE meeting_id = %s", (meeting_id,))
         cur.executemany(
@@ -357,6 +387,23 @@ def insert_speaker_turns(
             [(meeting_id, speaker, start, end) for speaker, start, end in turns],
         )
     conn.commit()
+
+
+def get_speaker_turns_for_stitch(
+    conn: psycopg.Connection[Any], meeting_id: str
+) -> list[tuple[str, float, float]]:
+    """Raw pyannote turns for the stitcher's merge step (D55). Empty when
+    diarization exhausted its retries (D50) or found no speech — the merge
+    module treats an empty list as a no-op, matching D48's "empty is a
+    success" precedent."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT speaker_label, start_s, end_s FROM speaker_turns WHERE meeting_id = %s",
+            (meeting_id,),
+        )
+        rows = cur.fetchall()
+    conn.commit()
+    return [(r[0], r[1], r[2]) for r in rows]
 
 
 def set_meeting_status(
