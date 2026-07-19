@@ -21,8 +21,8 @@ Domain renewal for `deepcoomer.dev` is the only pre-existing cost; no new spend.
 
 - **Groq audio budget:** ~2 hours of audio per clock-hour. Ten 1-hour meetings a day
   is ~130 chunk requests — far inside 2,000/day. This is portfolio scale with head-room.
-- **R2 10 GB:** a 1-hour meeting re-encoded to 16 kHz mono Opus ≈ 30 MB → ~300
-  meeting-hours stored. Lifecycle rule: delete raw audio 30 days after the transcript
+- **R2 10 GB:** a 1-hour meeting re-encoded to 16 kHz mono Opus ≈ 10–30 MB
+  (the bot records at 24 kbps ≈ 10 MB/h, D67) → ~300+ meeting-hours stored. Lifecycle rule: delete raw audio 30 days after the transcript
   is final (keep transcripts/metrics forever — they live in Postgres).
 - **12 GB RAM budget on the VM:**
 
@@ -39,8 +39,10 @@ Domain renewal for `deepcoomer.dev` is the only pre-existing cost; no new spend.
   | Headroom / page cache                            | 0.875 GB |
 
   Dropping ClickHouse (D42) freed 3 GB, which buys the **second concurrent
-  bot-recorded meeting**. The orchestrator enforces the cap with a semaphore
-  (2, or 1 while diarization is at peak); extra meetings queue. Fine for a
+  bot-recorded meeting**. The orchestrator enforces the cap with a static
+  semaphore (`BOT_MAX_CONCURRENT`, default 1 — the budget affords 2, set by
+  the operator, D72; the earlier "2, or 1 while diarization is at peak"
+  dynamic idea was rejected in the 5.1 review); extra meetings queue. Fine for a
   demo/small team; scale-out path is "add a host, point it at RabbitMQ." The
   embedder (3.5) reuses the diarizer's "CPU torch build, own line item"
   shape rather than sharing the already-budgeted extractor line — it's a

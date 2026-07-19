@@ -1,6 +1,6 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-19 (Phase 3b complete)_
+_Last updated: 2026-07-19 (Phase 3b complete; 5.1 done)_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
@@ -244,6 +244,27 @@ scale-out path if that ever changes.
 | 4.3 | Dashboard: charts for talk-time, interruption matrix, sentiment timeline, meeting load                       | Sonnet |
 
 ### Phase 5 — Google Meet bot (the flagship)
+
+_Status: **5.1 done** (2026-07-19, Fable as planned) — the design review
+studied both prior-art repos at source level (Vexa's current
+`core/meetings/services/bot/` and screenapp's `GoogleMeetBot.ts`) and
+rewrote `docs/meet-bot.md` into the implementable spec for 5.2–5.5:
+container anatomy (arm64, Xvfb + PulseAudio null sink + headful Playwright
+Chromium, PID-1 signal-forwarding entrypoint), browser launch profile
+(device-less join, stealth config, locale pinning, the mandatory
+`--mute-audio` strip), the join/admit/leave lifecycle state machine with an
+admission-outcome taxonomy, the orchestrator control plane, config table,
+failure-mode matrix, and a mock-Meet-page test strategy. Decisions D67–D72;
+the notable design change is D69 — the review caught that D32's
+"bot segments skip the slicer" idea breaks the stitcher's overlap
+assumption (ffmpeg `-f segment` output has no overlap), so bot segments
+are now crash insurance only and a `meeting.finalize` job (slicer-worker
+handler) concatenates them with silence-padded gaps into the canonical
+recording and feeds the unchanged pipeline via `meeting.uploaded`. D72
+also resolved the D31-vs-infrastructure.md concurrency drift (static
+`BOT_MAX_CONCURRENT`, default 1). 5.2 can start independently of 1.8 —
+the image is arm64 and runs on Apple Silicon locally; only live VM
+deployment waits on Oracle capacity._
 
 | #   | Ticket                                                                                                                                 | Model                              |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |

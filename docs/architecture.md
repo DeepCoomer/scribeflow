@@ -437,6 +437,11 @@ exchange: pipeline (topic)
   meeting.stitch     → q.stitcher
   meeting.extract    → q.extractor
   meeting.embed      → q.embedder        (3.5, D63 — parallel with extract)
+  bot.spawn          → q.bot_spawn       (Phase 5 — orchestrator consumer,
+                                          30-min message TTL, D31/D70/D72)
+  meeting.finalize   → q.slicer          (Phase 5 — concat bot segments +
+                                          silence-pad gaps → canonical r2_key
+                                          → publish meeting.uploaded, D69)
 exchange: events (fanout) → per-API-instance exclusive queue (SSE forwarding)
 each work queue → tiered retry queues (30s/2m/10m TTL), then q.parking
 ```
@@ -505,6 +510,11 @@ meeting_followups(id, tenant_id, meeting_id, body, sent_at)
                    -- actually-sent (possibly human-edited) draft, not a
                    -- regenerable default
 bot_sessions(id, meeting_id, container_id, state, joined_at, left_at, error)
+             -- Phase 0 sketch; the 5.5 migration adds tenant_id (invariant 2),
+             -- last_heartbeat_at, and outcome_detail, and `state` follows the
+             -- 5.1 lifecycle taxonomy (spawning/joining/lobby/recording/
+             -- leaving/done + not_admitted/denied/blocked/invalid_url/failed
+             -- terminal outcomes -- see meet-bot.md, D71)
 ```
 
 ### Analytics (Postgres for v1 — D42)

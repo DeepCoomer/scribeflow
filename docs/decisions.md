@@ -696,10 +696,13 @@ _Rejected:_ multi-meeting shared browser (one crash kills all recordings; audio
 sink routing across tabs is fragile).
 
 **D32 — Bot records in 5-minute segments uploaded as the meeting runs, not one file
-at the end.**
+at the end.** _"Skip the slicer" half SUPERSEDED by D69._
 A crash loses ≤5 minutes instead of the whole meeting, and the racing engine (D10)
 gets its chunks for free — bot recordings skip the slicer entirely. _Rejected:_
-single-file recording (all-or-nothing loss profile).
+single-file recording (all-or-nothing loss profile). _(5.1 review: the rolling
+5-minute segments stay, but ffmpeg's `-f segment` output has no overlap, so the
+segments cannot serve as racing-engine chunks — see D69 for the finalize path
+that feeds bot recordings through the normal pipeline instead.)_
 
 **D33 — Consent is non-negotiable: bot always visibly named "ScribeFlow Notetaker";
 host admission = consent; optional on-join chat announcement for two-party-consent
@@ -711,7 +714,114 @@ invariant.
 but build our own.**
 Their solutions to Meet's UI quirks save days; building it ourselves is still the
 point — the bot is the portfolio flagship. _Rejected:_ depending on Vexa wholesale
-(then the hardest part of the project isn't Deep's work).
+(then the hardest part of the project isn't Deep's work). _(Done in 5.1 —
+findings distilled into meet-bot.md's "Prior art" section and D67–D72.)_
+
+**D67 — Audio capture stays outside the page: PulseAudio null-sink monitor →
+ffmpeg rolling segments; Chromium launched with
+`ignoreDefaultArgs: ['--mute-audio']`.**
+Both prior arts capture *inside* the page on their Meet lane (screenapp:
+`getDisplayMedia` + `MediaRecorder` shuttling base64 chunks over an exposed
+function; Vexa: per-participant `<audio>`-element capture / an
+`RTCPeerConnection` hook) — but they do so to serve needs ScribeFlow doesn't
+have (video recording, live streaming to WhisperLive). In-page capture dies
+with the page's JS state and couples the recording to Meet's DOM; the
+PulseAudio monitor is one process boundary away from all of that and produces
+a plain file ffmpeg already knows how to segment. The capture format is 16 kHz
+mono Opus (~10 MB/h — half the infrastructure.md estimate), since the slicer
+re-encodes to FLAC (D47) and pyannote resamples to 16 kHz anyway. The
+screenapp lesson that makes this work at all: Playwright adds `--mute-audio`
+to Chromium by default, which would make the monitor capture pure silence —
+stripping it is asserted by a unit test on the launch profile. _Rejected:_
+in-page MediaRecorder capture (above), x11grab video capture (nothing
+downstream consumes video).
+
+**D68 — The bot joins device-less ("Continue without microphone and camera"),
+with a near-normal launch profile: stealth plugin (`iframe.contentWindow` +
+`media.codecs` evasions disabled), no fake-device flags, locale pinned to
+English (`hl=en` + `en-US` context).**
+screenapp's Google lane found Meet fingerprints hardest *before admission* and
+deliberately keeps launch flags minimal there, joining without devices; Vexa
+needs fake devices only for its TTS speak path, which we don't have. Device-less
+also means the bot cannot unmute, ever — a nice property for a consent-first
+product. Locale pinning replaces prior art's per-language selector tables
+(we control the browser, so multilingual text matching is self-inflicted
+complexity). Both prior arts independently ship the same stealth-plugin config,
+which is strong evidence it's the working combination. Anonymous join is the
+default; a dedicated signed-in profile (`BOT_STORAGE_STATE_PATH`) is the
+documented fallback for orgs that block anonymous guests (meet-bot.md). 
+_Rejected:_ `--use-fake-device-for-media-stream` on the Meet lane (the old
+meet-bot.md draft), per-locale selector variants.
+
+**D69 — Bot recordings enter the pipeline through one `meeting.finalize` path:
+segments are crash insurance only; a slicer-worker handler concatenates them
+(silence-padding wall-clock gaps), uploads the canonical file, and publishes a
+plain `meeting.uploaded`. Supersedes the "skip the slicer" half of D32.**
+The 5.1 review caught that D32's free-chunks idea doesn't survive contact with
+the invariants: `-f segment` produces *non-overlapping* segments, while the
+stitcher's dedup rules assume the 10 s overlap (D46/2.1), and diarization needs
+the concatenated full file regardless — so someone must concatenate anyway, and
+a zero-overlap mode would fork the racing engine's tested behavior for one
+producer. Segment keys embed `{idx}_{startedAtMs}` so the finalize handler can
+rebuild the absolute timeline with no metadata store, inserting silence for
+crash/rejoin gaps (invariant 4 — timestamps stay absolute). Clean leave and
+crash converge on the same finalize job (`{meetingId}:finalize:0`,
+deterministic, idempotent, normal retry ladder), which is exactly the shape the
+2.7 chaos tests already exercise. Cost of rejected purity: re-slicing seconds
+of CPU and one ~30 MB round trip per meeting. _Rejected:_ bot segments as
+racing-engine chunks (no overlap), overlapped double-recording in the bot
+(two ffmpeg processes to fake overlap), a zero-overlap stitch mode (forks
+D46's invariants), bot-side concat on clean exit only (two code paths where
+crash is the one that must work).
+
+**D70 — The bot container holds zero infrastructure credentials: an
+orchestrator HTTP control plane (heartbeat / events / per-segment presigned
+PUT URLs) with a random per-session token is the bot's only egress into our
+system.**
+The bot runs a full browser rendering attacker-adjacent content (whatever a
+meeting participant does), so it is the most exposed process in the product —
+7.1 will treat its container-escape surface as a headline item. Giving it R2,
+Postgres, or RabbitMQ credentials would make every Meet UI exploit a pivot
+into the data plane; presigned PUTs scoped to
+`tenant/{t}/meeting/{m}/bot-segments/` cap the blast radius at "can upload
+audio bytes to its own meeting." The orchestrator owns R2/DB/AMQP, records
+`bot_sessions` through tenant-scoped repositories (invariant 2 — the missing
+`tenant_id` column is added in 5.5's migration), and forwards state to the
+events exchange for SSE. Consistent with invariant 1: media bytes go
+client→R2; the API and orchestrator only mint URLs and enqueue. _Rejected:_
+AMQP/R2 credentials inside the bot container, bot→API status calls (the API
+shouldn't hold dockerode/bot session state), stdout-parsing as a control
+channel (no backchannel for presigned URLs).
+
+**D71 — Join/admission outcomes are a first-class taxonomy (`not_admitted`,
+`denied`, `blocked`, `invalid_url`, plus in-call `removed`); admission is
+detected by a participant-count signal, never by button presence; ≤3
+ask-to-join requests per admission window, denial always terminal; one
+automatic rejoin after an unexpected mid-meeting death.**
+screenapp's field experience: the "Leave call" button exists *while still in
+the lobby*, so admission tests on it produce recordings of the waiting room —
+the reliable signal is the participant count (`[data-avatar-count]` badge,
+`People - N joined` aria-label) combined with the absence of lobby text. Meet
+also silently expires ask-to-join requests ("No one responded to your
+request") and sometimes redirects mid-wait, so a bounded re-request loop is
+required — but 3 total asks, not prior art's 10 (a host who ignored two asks
+has answered; D33's trust posture applies). A crash mid-meeting gets exactly
+one fresh-container rejoin: the host sees one extra admission prompt, and the
+D69 silence padding absorbs the audio gap. _Rejected:_ admission via
+leave-button presence (lobby false positive), unlimited join-request retries
+(spam), auto-rejoin loops, retrying after an explicit denial.
+
+**D72 — Bot concurrency is a static semaphore `BOT_MAX_CONCURRENT`, default
+1; the RAM budget affords 2; no diarization-aware dynamic gating.**
+Resolves the doc drift between D31 ("caps concurrency at 1", written before
+D42 freed 3 GB) and infrastructure.md's post-D42 budget ("2, or 1 while
+diarization is at peak"). Coupling spawn admission to live pipeline load means
+the orchestrator polling worker state to decide whether a bot may join a
+meeting — real complexity, and at demo scale the second concurrent meeting is
+rare enough that a static operator-set cap covers it. Default ships at 1
+(CLAUDE.md invariant 6's conservative reading); an operator can set 2, which
+the budget table explicitly reserves. _Rejected:_ dynamic
+diarization-load-aware semaphore, hardcoding the cap.
 
 ## Frontend & demo
 

@@ -37,8 +37,14 @@ approval-gated send, D65), and **3.8** the nudge agent (a standalone daily
 scan, once-per-day-per-owner Resend digest, D66) — see `docs/plan.md`'s
 Phase 3b status for what was verified and the model-assignment deviation
 (all four ran on Sonnet by request, including 3.6 documented as Opus).
-Next: Phase 4.1 (Postgres `utterance_metrics`, Sonnet), or Phase 5 (the Meet
-bot, the flagship) once 1.8's Oracle capacity frees up — per `docs/plan.md`.
+**5.1 (Meet-bot design review) is done** (2026-07-19, Fable) —
+`docs/meet-bot.md` is now the implementable spec for 5.2–5.5, with D67–D72
+(notably D69: bot segments no longer skip the slicer; a `meeting.finalize`
+job concatenates them into the canonical recording and feeds the normal
+pipeline). Next: 5.2 (bot container, Opus) — buildable/testable locally on
+Apple Silicon (arm64), only VM deployment waits on 1.8's Oracle capacity;
+Phase 4.1 (Postgres `utterance_metrics`, Sonnet) remains available as a
+parallel track — per `docs/plan.md`.
 The design in `docs/` is authoritative — read the relevant doc before
 implementing, and update it when reality diverges.
 
@@ -90,7 +96,8 @@ ticket ID and the relevant doc section in your work.
    always chunked. They run in parallel and merge at the stitcher.
 6. **Stay inside free tiers.** Groq calls go through the shared rate limiter
    (20 req/min); respect the RAM budget in `docs/infrastructure.md` (12 GB total,
-   max 1 concurrent bot container); R2 lifecycle deletes raw audio after 30 days.
+   bot concurrency capped by `BOT_MAX_CONCURRENT`, default 1 — D72); R2
+   lifecycle deletes raw audio after 30 days.
 7. **The bot is always visible and named** ("ScribeFlow Notetaker"), never hidden.
    The follow-up agent drafts; a human approves — it never auto-sends.
 8. **Secrets** live only in the VM's `.env` (git-ignored); every new variable gets
