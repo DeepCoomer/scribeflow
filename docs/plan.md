@@ -1,6 +1,6 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-18_
+_Last updated: 2026-07-19_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
@@ -103,8 +103,16 @@ to the stitch dedup rule). Deviation from the model-strategy table: 2.2–2.5
 were run as **Sonnet** in one combined session by explicit user request,
 not Opus/one-ticket-per-session as originally planned — noted here rather
 than changing the table, since Opus stays the default for this shape of
-ticket going forward. Next: 2.6 (speaker merge, Fable design → Opus impl),
-2.7 (chaos tests, Opus), 2.8 (pipeline code review, Opus, D41)._
+ticket going forward. **2.6 design half done** (2026-07-19) — the
+speaker–transcript merge is specified in architecture.md
+("Speaker–transcript merge") with D55–D57: the merge runs inside the
+stitcher's finalize transaction; segments store the raw diarization label
+with human names in a new `meeting_speakers` table (calendar attendees are
+rename candidates only, never auto-assigned); the interruption rule is
+defined but materialized only in 4.1, with `speaker_turns` retained
+post-merge. Next: 2.6 impl (Opus — scope list is in the architecture.md
+merge section), 2.7 (chaos tests, Opus), 2.8 (pipeline code review, Opus,
+D41)._
 
 | #   | Ticket                                                                                                                                                              | Model                            |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |

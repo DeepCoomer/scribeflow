@@ -234,6 +234,57 @@ of neighbor status (loses good data next to any failure) and treating
 "zero rows" as "chunk failed" (would gap-mark genuinely silent-but-successful
 audio, contradicting D48).
 
+**D55 — The speaker merge runs inside the stitcher; assignment aggregates
+overlap per label, with NULL speaker on zero overlap.**
+The merge's precondition — both branches terminal — is exactly the stitch
+trigger condition, so a separate merge worker/message would add a queue hop
+and a second crash window for zero parallelism gain. The stitcher assigns
+speakers to the kept segments and commits them in the same finalize
+transaction as the deletes, gaps, and terminal status: crash-safe, and pure
+recomputation keeps stitch redelivery idempotent (extends D11's determinism
+argument). Sharpenings of D13: overlap is **summed per label across turns**
+(pyannote splits continuous speech into adjacent turns; single-turn
+comparison undercounts the true speaker), ties go to the lexicographically
+smallest label (determinism only), and zero overlap leaves `speaker` NULL —
+no nearest-turn fallback, no minimum-overlap threshold. A visible "Unknown"
+beats a confidently wrong name, and thresholds manufacture Unknowns from
+turn boundaries that are merely sloppy. _Rejected:_ a dedicated merge stage
+(above), nearest-turn fallback (fabricates attribution), minimum-overlap
+threshold (creates false Unknowns).
+
+**D56 — Segments store the raw diarization label; human names live in
+`meeting_speakers`; calendar attendees are rename candidates, never
+auto-assignments.**
+`transcript_segments.speaker` keeps `SPEAKER_NN` as a stable key. A new
+`meeting_speakers` table (`UNIQUE (meeting_id, speaker_label)`) maps label →
+`display_name` with optional `user_id` and a provenance `source`
+(`default|user|calendar|voiceprint`). The stitcher seeds defaults
+("Speaker N", numbered by first turn start — first voice heard is
+Speaker 1) via `ON CONFLICT DO NOTHING`, so re-stitching never clobbers a
+user's rename, and renames are one-row updates instead of mass segment
+sweeps. Phase 6's calendar roster only **feeds the rename UI's candidate
+list** — an attendee list says who was present, not which voice is which,
+so the count-matching auto-assignment sketched earlier in architecture.md
+is explicitly rejected; per-tenant voice-print auto-matching stays the
+documented stretch. _Rejected:_ denormalizing display names into segments
+(rename becomes a mass update and a re-stitch clobbers it), auto-assigning
+names by matching voice count to attendee count (guaranteed misattribution
+with no human in the loop).
+
+**D57 — Interruption detection is specified with the merge but materialized
+only in Phase 4.1; `speaker_turns` is retained after the merge.**
+The D13 rule sharpened: ≥2 distinct labels each overlapping >30 % of a
+segment's duration flags an interruption (the interrupter is the
+non-assigned label). It ships as a pure function in the merge module, but no
+flag column lands on `transcript_segments` in v1 — nothing in the v1
+product reads it (the same no-reader reasoning that deferred ClickHouse,
+D42); Phase 4.1 computes it into `utterance_metrics` from the retained
+`speaker_turns`. Retention also keeps re-stitching idempotent — the merge's
+input must survive the merge. _Rejected:_ an `is_interruption` /
+`interrupted_by` column now (an analytics column with no reader), deleting
+`speaker_turns` post-merge (destroys the re-stitch input and 4.1's source
+data).
+
 ## Data layer
 
 **D17 — Two databases: Postgres for state, ClickHouse for analytics.**

@@ -15,8 +15,10 @@ pipeline). **1.7 (Vercel) is live** at `scribeflow.deepcoomer.dev`. **1.8
 up. **2.1 (racing-engine spec) is done** — edge cases specified in
 `docs/architecture.md` + D46–D50. **2.2–2.5 (slicer, chunk transcriber,
 stitcher, diarizer) are done** — see `docs/plan.md`'s Phase 2 status for
-what was verified and the model-assignment deviation. Next: 2.6 (speaker
-merge design, Fable), per `docs/plan.md`. The
+what was verified and the model-assignment deviation. **2.6's design half
+is done** — merge spec in `docs/architecture.md` ("Speaker–transcript
+merge") + D55–D57, with the impl scope list for Opus. Next: 2.6 impl
+(Opus), per `docs/plan.md`. The
 design in `docs/` is authoritative — read the relevant doc before implementing, and
 update it when reality diverges.
 

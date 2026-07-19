@@ -212,13 +212,103 @@ windows and their closures:
 pyannote clusters speaker embeddings **globally** — chunking it would let "Speaker A"
 in chunk 1 become "Speaker B" in chunk 4 with no way to reconcile. So diarization
 runs once over the full file, in parallel with the racing branch (it's the long pole;
-on CPU expect ~0.5–1× real time). The merge step assigns each transcript segment the
-speaker whose turn has **maximum temporal overlap** with it; segments overlapping two
-turns >30% each are flagged as interruptions (an analytics feature, not a bug).
+on CPU expect ~0.5–1× real time). The two branches meet at the stitcher, where the
+merge below assigns speakers to the final transcript.
 
-Speaker labels → human names: match diarized voice count against calendar attendees,
-let users confirm/correct in the UI once, then persist a per-tenant voice-print
-embedding for future automatic matching (stretch).
+### Speaker–transcript merge (2.6, D13 + D55–D57)
+
+The merge runs **inside the stitcher** (D55), between cross-cut dedup and the
+finalize transaction — not as a separate stage. Its precondition (both
+branches terminal) is exactly the stitch trigger condition, so a dedicated
+merge worker would add a queue hop and a second crash window and could never
+start any earlier. Speaker assignments commit in the **same transaction** as
+the segment deletes, gap rows, and terminal status, so a crash can't leave a
+finalized meeting half-speakered; and because the assignment is a pure
+function of surviving segments + `speaker_turns`, a redelivered stitch
+recomputes identical speakers — determinism ⇒ idempotency, same argument as
+D11.
+
+**Assignment rule.** For each kept segment, sum overlap **per speaker label**
+across all of that label's turns:
+`overlap(seg, label) = Σ_turns max(0, min(seg.end, turn.end) − max(seg.start, turn.start))`.
+Summing per label matters because pyannote often splits one continuous speech
+run into adjacent turns; comparing single turns would undercount the true
+speaker. The label with the maximum total is written to
+`transcript_segments.speaker`. Ties (rare, degenerate) go to the
+lexicographically smallest label — the tie-break means nothing except
+determinism. Segments stay the atomic unit (D13): no word-level assignment,
+because pyannote turn boundaries aren't word-accurate.
+
+- **Zero overlap → `speaker` stays NULL**, rendered as "Unknown" in the
+  viewer. No nearest-turn fallback: no overlapping turn means diarization
+  heard no speech there, and for a product whose value is "who said what," a
+  visible Unknown beats a confidently wrong name.
+- **No minimum-overlap threshold:** any positive overlap beats none.
+  Thresholds manufacture Unknowns in normal speech where turn boundaries are
+  merely sloppy.
+- **Diarization exhausted** (D50): `speaker_turns` is empty, the merge is a
+  no-op, all speakers stay NULL, and the recorded `diarization_error` already
+  forces the terminal status to `partial`.
+- **Diarization succeeded with zero turns** (all-silence/music meeting): same
+  no-op, but the terminal status is unaffected — consistent with D48's
+  "empty is a success."
+- **Interruptions** (D13 sharpened): ≥2 distinct labels each overlapping a
+  segment by >30 % of the segment's duration flag it as an interruption
+  (the interrupter is the non-assigned label). The rule ships as a pure
+  function in the merge module but is **materialized only by Phase 4.1**
+  into `utterance_metrics` — no analytics column on `transcript_segments`
+  in v1 (D57). `speaker_turns` rows are **retained** after the merge for
+  exactly this reason, plus idempotent re-stitching.
+
+Implementation shape: sort segments and turns by start and sweep with a
+two-pointer window (turns overlapping the current segment) —
+O((n+m) log(n+m)). At portfolio scale even the naive n·m product is
+thousands × hundreds, so the sweep is a nicety, not a requirement.
+
+**Labels vs display names (D56).** `transcript_segments.speaker` stores the
+**raw diarization label** (`SPEAKER_00`, …) — a stable key, never a human
+name. Names live in `meeting_speakers`, one row per label per meeting:
+
+```
+meeting_speakers(id, meeting_id, speaker_label, display_name,
+                 user_id NULL, source default|user|calendar|voiceprint,
+                 UNIQUE (meeting_id, speaker_label))
+```
+
+The stitcher seeds it with `display_name = "Speaker N"`, numbering labels by
+**first turn start** (the first voice heard is Speaker 1), via
+`INSERT … ON CONFLICT DO NOTHING` — a re-stitched meeting never clobbers a
+rename the user already made. Reads resolve names by joining through it;
+renaming a speaker is a one-row update, not a sweep over thousands of
+segment rows. Like `transcript_segments`, the table carries no `tenant_id`
+— reads and writes join through `meetings`, and repository functions still
+require `tenantId` (D20).
+
+**Calendar names are candidates, not assignments (D56).** An attendee roster
+says who was in the room — never which voice is which; auto-matching
+"3 voices ↔ 3 attendees" misattributes the moment it's applied.
+`PATCH /meetings/:id/speakers/:label` `{display_name, user_id?}` records a
+user's mapping (`source = 'user'`); Phase 6 populates a candidate list from
+the meeting's `calendar_event_id` attendees for the rename UI to offer;
+per-tenant voice-print auto-matching stays the documented stretch. Until
+Phase 6 the rename input is free text.
+
+**Ticket 2.6 impl scope (Opus):**
+
+1. Migration: `meeting_speakers`; update the `speaker_turns` schema comment
+   (retained post-merge, D57).
+2. Workers: a `merge.py` module (pure functions: per-label overlap,
+   assignment, interruption predicate) + stitcher integration;
+   `finalize_stitch` grows the speaker updates and `meeting_speakers`
+   seeding inside its existing single transaction.
+3. API: the meeting read returns the `meeting_speakers` rows; the PATCH
+   rename endpoint (Zod-validated, tenant-scoped).
+4. Web: viewer renders display names (NULL → "Unknown"), inline rename.
+5. Tests: a determinism property test (same inputs ⇒ same assignment), each
+   edge case above, and a stitcher integration test on recorded fixtures.
+
+No queue-contract change: the merge rides the existing `meeting.stitch`
+message and emits no new events.
 
 ## Queue topology
 
@@ -270,8 +360,11 @@ transcript_segments(id, meeting_id, chunk_idx, speaker, start_s, end_s,
                     text, words_jsonb)
 transcript_gaps(id, meeting_id, start_s, end_s, reason)   -- written at stitch (D49)
 speaker_turns(id, meeting_id, speaker_label, start_s, end_s)  -- raw pyannote (2.5);
-                                                               -- ticket 2.6 merges into
-                                                               -- transcript_segments
+                                                               -- read by the 2.6 merge and
+                                                               -- retained afterwards (D57)
+meeting_speakers(id, meeting_id, speaker_label, display_name,  -- label → name map (D56);
+                 user_id, source)                              -- seeded at stitch, edited
+                                                               -- via the rename endpoint
 action_items(id, meeting_id, tenant_id, text, owner_user_id, due_date,
              confidence, status, source_segment_id)
 bot_sessions(id, meeting_id, container_id, state, joined_at, left_at, error)
