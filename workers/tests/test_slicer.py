@@ -195,16 +195,42 @@ def test_exhausted_hook_marks_meeting_failed(monkeypatch: pytest.MonkeyPatch) ->
         def publish(self, routing_key: str, message: Any) -> None:
             raise AssertionError("should not publish jobs on exhaustion")
 
-    statuses: list[tuple[str, str | None]] = []
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_fail_if_not_terminal(conn: Any, t: str, m: str, error: str) -> bool:
+        calls.append((t, m, error))
+        return True
+
     monkeypatch.setattr(
-        db_module,
-        "set_meeting_status",
-        lambda conn, t, m, status, error=None, duration_s=None: statuses.append(
-            (status, error)
-        ),
+        db_module, "fail_meeting_if_not_terminal", fake_fail_if_not_terminal
     )
     on_exhausted = slicer.make_on_exhausted(deps)
     on_exhausted(payload(), "ffmpeg crashed", Ctx())
 
-    assert statuses[0][0] == "failed"
+    assert calls == [(TENANT, MEETING, "slicing failed: ffmpeg crashed")]
     assert events[0].status == "failed"
+
+
+def test_exhausted_hook_does_not_clobber_an_already_terminal_meeting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (2.8 review): a retry of this slicer job can have already
+    # published chunk.transcribe jobs (D15, idempotent) for chunks that
+    # went on to complete the whole pipeline through a real stitch before
+    # this job's own retries exhaust. fail_meeting_if_not_terminal's False
+    # return means the meeting was already done/partial/failed -- publishing
+    # a "failed" event here would contradict that already-delivered state.
+    deps = make_deps()
+
+    class Ctx:
+        def publish_event(self, event: StatusEventV1) -> None:
+            raise AssertionError("must not publish a status event")
+
+        def publish(self, routing_key: str, message: Any) -> None:
+            raise AssertionError("should not publish jobs on exhaustion")
+
+    monkeypatch.setattr(
+        db_module, "fail_meeting_if_not_terminal", lambda conn, t, m, error: False
+    )
+    on_exhausted = slicer.make_on_exhausted(deps)
+    on_exhausted(payload(), "ffmpeg crashed", Ctx())  # must not raise

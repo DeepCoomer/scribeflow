@@ -159,6 +159,22 @@ def test_redelivered_done_job_rechecks_fan_in(db_calls: DbCalls) -> None:
     assert message == MeetingStitchV1(tenant_id=TENANT, meeting_id=MEETING)
 
 
+def test_redelivered_done_job_does_not_republish_once_already_stitched(
+    db_calls: DbCalls,
+) -> None:
+    # Regression (2.8 review): a duplicate meeting.diarize arriving after
+    # the meeting was already stitched must not republish meeting.stitch --
+    # chunks_done/diarization_done stay true forever once set, so without
+    # checking status this would fire on every future redelivery.
+    db_calls.claim_result = False
+    db_calls.fan_in_result = FanIn(
+        chunks_done=3, total_chunks=3, diarization_done=True, status="done"
+    )
+    ctx = FakeCtx()
+    diarizer.handle_meeting_diarize(payload(), ctx, make_deps())
+    assert ctx.published == []
+
+
 def test_invalid_message_is_permanent(db_calls: DbCalls) -> None:
     with pytest.raises(PermanentError):
         diarizer.handle_meeting_diarize({"v": 1, "nope": True}, FakeCtx(), make_deps())

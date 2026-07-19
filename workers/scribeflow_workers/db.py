@@ -428,6 +428,39 @@ def set_meeting_status(
     conn.commit()
 
 
+def fail_meeting_if_not_terminal(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    meeting_id: str,
+    error: str,
+) -> bool:
+    """Marks a meeting failed unless it already reached a terminal status
+    (D49 owns that transition set: done/partial/failed). Exists for
+    exhausted-hooks that sit outside the fan-in/stitch machinery (the
+    slicer's, specifically): its own retries can publish real, idempotent
+    chunk jobs before the slicer job itself gives up, and those chunks can
+    independently complete the pipeline through a real stitch before the
+    slicer's last retry fails — this guard is what stops that correct
+    outcome from being overwritten by a stale 'failed', the same
+    two-writers-of-a-terminal-state hazard D49 named for the chunk
+    exhausted-hook. Returns whether it actually transitioned, so a caller
+    can skip publishing a status event that would otherwise contradict the
+    real (already-delivered) terminal state."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE meetings SET status = 'failed', error = %s
+            WHERE id = %s AND tenant_id = %s
+              AND status <> 'done' AND status <> 'partial' AND status <> 'failed'
+            RETURNING id
+            """,
+            (error, meeting_id, tenant_id),
+        )
+        transitioned = cur.fetchone() is not None
+    conn.commit()
+    return transitioned
+
+
 # -- transcript segments --------------------------------------------------------
 
 

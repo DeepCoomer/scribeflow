@@ -82,6 +82,16 @@ failure. **Approach:** slice → parallel map → deterministic reduce.
   `meeting.diarize` job, sets status `transcribing`, and completes its job.
   Re-slicing is deterministic (same `D` → same cuts) and chunk jobs are
   idempotent, so duplicate publishes are harmless.
+- **Slicer exhaustion (D58):** if the slicer job itself exhausts its
+  retries, its exhausted-hook only marks the meeting `failed` when it isn't
+  already terminal. That guard matters because a retry that fails partway
+  through the per-chunk loop still publishes real chunk jobs for every chunk
+  before its failure point (harmless duplicates on top of the previous
+  attempt's, per the idempotency above) — so a flaky-but-not-fully-broken
+  failure can let the racing branch complete the whole meeting through a
+  real stitch before the slicer's own retries give up. The stitcher still
+  owns done/partial/failed (D49); this closes the one spot outside the
+  fan-in/stitch machinery that used to write a terminal status directly.
 
 ### Parallel transcription
 

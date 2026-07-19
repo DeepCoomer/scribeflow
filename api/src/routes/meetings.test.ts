@@ -258,6 +258,26 @@ describe("speaker rename (2.6)", () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  it("rejects a userId that does not belong to the caller's tenant (D20)", async () => {
+    const meetingId = await createMeeting();
+    await app.db
+      .insert(meetingSpeakers)
+      .values([{ meetingId, speakerLabel: "SPEAKER_00", displayName: "Speaker 1" }]);
+    const other = await registerUser(app, `foreign-user-${Date.now()}@example.com`);
+    const otherPayload = JSON.parse(
+      Buffer.from(other.token.split(".")[1]!, "base64url").toString(),
+    );
+    const foreignUserId = otherPayload.userId as string;
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/speakers/SPEAKER_00`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { displayName: "Alex", userId: foreignUserId },
+    });
+    expect(res.statusCode).toBe(400);
+  });
 });
 
 describe("job status SSE (1.6)", () => {

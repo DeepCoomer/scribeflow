@@ -10,6 +10,7 @@ import {
 } from "../db/repositories/meetings.js";
 import { listSegments } from "../db/repositories/segments.js";
 import { listSpeakers, renameSpeaker } from "../db/repositories/speakers.js";
+import { findUserById } from "../db/repositories/users.js";
 import { ROUTING_KEYS } from "../queue/topology.js";
 import type { MeetingUploadedV1, StatusEventV1 } from "../queue/messages.js";
 import { parseCorsOrigins } from "../lib/cors.js";
@@ -181,6 +182,15 @@ export default async function meetingRoutes(app: FastifyInstance) {
     const { id, label } = speakerParamSchema.parse(request.params);
     const body = renameSpeakerSchema.parse(request.body);
     const { tenantId } = request.auth!;
+
+    // D20: userId is caller-supplied, so it must be checked against the
+    // caller's own tenant before it's allowed to land on another tenant's
+    // meeting_speakers row — otherwise any authenticated user could link an
+    // arbitrary user id (from any tenant) into someone else's meeting.
+    if (body.userId) {
+      const owner = await findUserById(app.db, tenantId, body.userId);
+      if (!owner) return reply.badRequest("userId does not belong to this tenant");
+    }
 
     const updated = await renameSpeaker(app.db, tenantId, id, label, {
       displayName: body.displayName,

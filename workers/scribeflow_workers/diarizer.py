@@ -37,8 +37,28 @@ def job_key(meeting_id: str) -> str:
     return f"{meeting_id}:{STAGE}:0"
 
 
-def _maybe_trigger_stitch(conn: Any, tenant_id: str, meeting_id: str, ctx: JobContext) -> None:
+def _maybe_trigger_stitch(
+    conn: Any,
+    tenant_id: str,
+    meeting_id: str,
+    ctx: JobContext,
+    *,
+    require_transcribing: bool = False,
+) -> None:
+    """require_transcribing is only for the redelivery-recheck path below: a
+    duplicate meeting.diarize arriving after this meeting was already
+    stitched would otherwise still see chunks_done>=total and
+    diarization_done (both stay true forever once set) and republish
+    meeting.stitch -- harmless (the stitcher's own claim_job dedups it,
+    D50) but pointless queue chatter. The happy-path completion and the
+    exhausted-hook don't need this: diarization_done can only flip true
+    once, at exactly one of those two call sites, and fan-in can't have
+    closed from the diarization side before that first flip -- so a stitch
+    can't already exist yet when either of them runs (mirrors the same
+    optimization transcriber.py's analogous redelivery-recheck applies)."""
     fan_in = db.get_fan_in(conn, meeting_id)
+    if require_transcribing and fan_in.status != "transcribing":
+        return
     if fan_in.chunks_done >= fan_in.total_chunks and fan_in.diarization_done:
         ctx.publish(MEETING_STITCH, MeetingStitchV1(tenant_id=tenant_id, meeting_id=meeting_id))
 
@@ -63,7 +83,9 @@ def _run(msg: MeetingDiarizeV1, ctx: JobContext, deps: Deps, key: str) -> None:
         # Same crash-window closure as the chunk transcriber (D50): a
         # redelivery that finds this job already done still re-checks
         # whether the racing branch closed fan-in while we were down.
-        _maybe_trigger_stitch(deps.conn, msg.tenant_id, msg.meeting_id, ctx)
+        _maybe_trigger_stitch(
+            deps.conn, msg.tenant_id, msg.meeting_id, ctx, require_transcribing=True
+        )
         return
 
     r2.assert_tenant_key(msg.r2_key, msg.tenant_id)

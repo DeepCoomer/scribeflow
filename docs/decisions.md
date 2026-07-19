@@ -234,6 +234,43 @@ of neighbor status (loses good data next to any failure) and treating
 "zero rows" as "chunk failed" (would gap-mark genuinely silent-but-successful
 audio, contradicting D48).
 
+**D58 — The terminal-status-ownership rule (D49: the stitcher owns
+done/partial/failed) extends to every exhausted-hook that sits outside the
+fan-in/stitch machinery, not just the chunk transcriber's.**
+Found during the 2.8 pipeline review: the slicer's exhausted-hook
+unconditionally set the meeting to `failed` on giving up, reasoning that
+"nothing has been sliced yet" — true only when the very first chunk in the
+per-chunk loop fails. Every retry of the slicer job re-runs that loop from
+scratch, and each attempt's successfully-sliced chunks publish real,
+idempotent `chunk.transcribe` jobs (D15) before that attempt itself fails
+partway through. Under a flaky-but-not-fully-broken failure (a transient
+R2/ffmpeg error that doesn't hit the same chunk index on every attempt),
+those chunks can independently complete the pipeline — and the stitcher can
+reach a real `done`/`partial` — before the slicer job's own retries exhaust.
+Overwriting that with `failed` is exactly the two-writers-of-a-terminal-state
+hazard D49 named for the chunk exhausted-hook, just not noticed at the
+slicer callsite when 2.2 shipped. Fix: `db.fail_meeting_if_not_terminal`
+(`WHERE status NOT IN (done, partial, failed)`, mirroring the exactly-once
+`RETURNING`-gated pattern used throughout `db.py`) replaces the slicer
+exhausted-hook's direct `set_meeting_status` call; a `False` return (already
+terminal) also skips the `failed` SSE event, so a live dashboard client
+never sees a status that contradicts what already shipped. The same review
+found the diarizer's redelivery-recheck path (a duplicate `meeting.diarize`
+arriving after the meeting was already stitched) republishing
+`meeting.stitch` unconditionally — harmless (D50: the stitcher's own
+`claim_job` dedups it) but pointless queue chatter the transcriber's
+analogous path already guards against; `_maybe_trigger_stitch` gained a
+`require_transcribing` flag used only on that one call site, matching
+transcriber.py's existing pattern. Also fixed in the same pass (invariant 2,
+not a new decision): the 2.6 speaker-rename endpoint accepted a
+caller-supplied `userId` without checking it belonged to the caller's own
+tenant — `findUserById(tenantId, userId)` now gates it, same as every other
+tenant-scoped write. _Rejected:_ leaving the slicer's `set_meeting_status`
+call unconditional but tightening only the exhausted-hook's own retry
+behavior (doesn't address that OTHER attempts' side effects, not this
+attempt's, are what create the race — the guard belongs at the write, not
+the retry).
+
 **D55 — The speaker merge runs inside the stitcher; assignment aggregates
 overlap per label, with NULL speaker on zero overlap.**
 The merge's precondition — both branches terminal — is exactly the stitch

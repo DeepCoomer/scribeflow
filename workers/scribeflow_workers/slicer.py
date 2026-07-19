@@ -119,18 +119,33 @@ def _run(msg: MeetingUploadedV1, ctx: JobContext, deps: Deps, key: str) -> None:
 
 
 def make_on_exhausted(deps: Deps) -> Any:
-    """Unlike a chunk-transcribe exhaustion (D49), nothing has been sliced
-    yet, so there's no fan-in to keep alive — a slicer failure just fails
-    the whole meeting, same shape as Phase 1's single-shot exhausted-hook."""
+    """A slicer failure normally fails the whole meeting outright — unlike a
+    chunk-transcribe exhaustion (D49), there's usually no fan-in yet to keep
+    alive. But "usually" isn't "always": every retry of this job re-runs the
+    per-chunk loop from scratch, and each attempt's successfully-sliced
+    chunks publish real, idempotent chunk.transcribe jobs (D15) before that
+    attempt itself fails partway through. Under a flaky-but-not-fully-broken
+    failure (a transient R2/ffmpeg error that doesn't hit the same chunk on
+    every attempt), those chunks can independently complete the pipeline —
+    and the stitcher can reach a real 'done'/'partial' — before this job's
+    own retries exhaust. Unconditionally overwriting that with 'failed' here
+    would be the exact two-writers-of-a-terminal-state hazard D49 named for
+    the chunk exhausted-hook; `fail_meeting_if_not_terminal` is the same
+    guard applied to this hook."""
 
     def on_exhausted(payload: dict[str, Any], error: str, ctx: JobContext) -> None:
         tenant_id = payload.get("tenant_id")
         meeting_id = payload.get("meeting_id")
         if not isinstance(tenant_id, str) or not isinstance(meeting_id, str):
             return
-        db.set_meeting_status(
-            deps.conn, tenant_id, meeting_id, "failed", f"slicing failed: {error}"
+        transitioned = db.fail_meeting_if_not_terminal(
+            deps.conn, tenant_id, meeting_id, f"slicing failed: {error}"
         )
+        if not transitioned:
+            log.info(
+                "slicer.exhausted_after_meeting_already_terminal", meeting_id=meeting_id
+            )
+            return
         ctx.publish_event(
             StatusEventV1(
                 tenant_id=tenant_id,
