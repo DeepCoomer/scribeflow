@@ -14,6 +14,9 @@ export async function listSegments(db: Db, tenantId: string, meetingId: string) 
       startS: transcriptSegments.startS,
       endS: transcriptSegments.endS,
       text: transcriptSegments.text,
+      // Ticket 3.2: null until the extractor's batched sentiment pass runs.
+      sentimentLabel: transcriptSegments.sentimentLabel,
+      sentimentScore: transcriptSegments.sentimentScore,
     })
     .from(transcriptSegments)
     .innerJoin(meetings, eq(transcriptSegments.meetingId, meetings.id))

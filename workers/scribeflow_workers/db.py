@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -240,6 +241,18 @@ def _transition_and_count(
     return transitioned, row[0], row[1]
 
 
+def job_exists(conn: psycopg.Connection[Any], job_key: str) -> bool:
+    """Whether any attempt has ever been recorded for this job key — used by
+    the stitcher's redelivery path to decide if meeting.extract still needs
+    publishing (D59), without republishing on every future duplicate stitch
+    delivery once extraction has actually started."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM jobs WHERE job_key = %s", (job_key,))
+        row = cur.fetchone()
+    conn.commit()
+    return row is not None
+
+
 def get_chunk_statuses(conn: psycopg.Connection[Any], meeting_id: str) -> dict[int, str]:
     """Per-chunk terminal state (done/exhausted) for the transcribe stage,
     keyed by chunk_idx parsed from the deterministic job key (D15)."""
@@ -459,6 +472,250 @@ def fail_meeting_if_not_terminal(
         transitioned = cur.fetchone() is not None
     conn.commit()
     return transitioned
+
+
+# -- extraction (3.1/3.2, D59) -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExtractionSegmentRow:
+    id: str
+    start_s: float
+    end_s: float
+    speaker_name: str | None
+    text: str
+
+
+def get_transcript_for_extraction(
+    conn: psycopg.Connection[Any], meeting_id: str
+) -> list[ExtractionSegmentRow]:
+    """Final (post-stitch) segments with resolved speaker display names, for
+    the extractor's prompt and sentiment batches. A NULL speaker (no
+    diarization overlap, D55) comes back as None — the caller renders it
+    "Unknown", same as the viewer."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ts.id, ts.start_s, ts.end_s, ms.display_name, ts.text
+            FROM transcript_segments ts
+            LEFT JOIN meeting_speakers ms
+              ON ms.meeting_id = ts.meeting_id AND ms.speaker_label = ts.speaker
+            WHERE ts.meeting_id = %s
+            ORDER BY ts.start_s
+            """,
+            (meeting_id,),
+        )
+        rows = cur.fetchall()
+    conn.commit()
+    return [
+        ExtractionSegmentRow(
+            id=str(r[0]), start_s=r[1], end_s=r[2], speaker_name=r[3], text=r[4]
+        )
+        for r in rows
+    ]
+
+
+@dataclass(frozen=True)
+class ActionItemInput:
+    text: str
+    owner_name: str | None
+    due_date: Any  # datetime | None — psycopg adapts a datetime, not a raw string
+    confidence: float
+    source_segment_id: str | None
+
+
+@dataclass(frozen=True)
+class SentimentUpdate:
+    segment_id: str
+    label: str
+    score: float
+
+
+@dataclass(frozen=True)
+class ExtractionFinalization:
+    tenant_id: str
+    meeting_id: str
+    summary: str
+    decisions: list[dict[str, Any]]  # jsonb payload
+    model: str
+    action_items: list[ActionItemInput]
+    sentiment: list[SentimentUpdate]
+
+
+def finalize_extraction(conn: psycopg.Connection[Any], f: ExtractionFinalization) -> None:
+    """Replace-by-meeting for action_items (mirrors replace_segments, D15),
+    upsert-by-meeting for meeting_summaries (no natural per-row identity to
+    replace-by-delete here, unlike action items — D59), and best-effort
+    per-segment sentiment updates — one transaction, so a redelivered
+    meeting.extract job can't leave duplicate action items or a
+    half-written summary behind. The meeting lookup doubles as the tenant
+    check, same as replace_segments."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM meetings WHERE id = %s AND tenant_id = %s",
+            (f.meeting_id, f.tenant_id),
+        )
+        if cur.fetchone() is None:
+            conn.rollback()
+            raise ValueError(f"meeting {f.meeting_id} not found for tenant {f.tenant_id}")
+
+        cur.execute("DELETE FROM action_items WHERE meeting_id = %s", (f.meeting_id,))
+        cur.executemany(
+            """
+            INSERT INTO action_items
+              (tenant_id, meeting_id, text, owner_name, due_date, confidence,
+               source_segment_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    f.tenant_id,
+                    f.meeting_id,
+                    item.text,
+                    item.owner_name,
+                    item.due_date,
+                    item.confidence,
+                    item.source_segment_id,
+                )
+                for item in f.action_items
+            ],
+        )
+
+        cur.execute(
+            """
+            INSERT INTO meeting_summaries
+              (tenant_id, meeting_id, summary, decisions_jsonb, model)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (meeting_id) DO UPDATE
+              SET summary = EXCLUDED.summary,
+                  decisions_jsonb = EXCLUDED.decisions_jsonb,
+                  model = EXCLUDED.model,
+                  updated_at = now()
+            """,
+            (f.tenant_id, f.meeting_id, f.summary, json.dumps(f.decisions), f.model),
+        )
+
+        if f.sentiment:
+            cur.executemany(
+                """
+                UPDATE transcript_segments
+                SET sentiment_label = %s, sentiment_score = %s
+                WHERE id = %s
+                """,
+                [(s.label, s.score, s.segment_id) for s in f.sentiment],
+            )
+    conn.commit()
+
+
+# -- nudges (3.8, D66) ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NudgeCandidate:
+    id: str
+    owner_user_id: str
+    owner_email: str
+    owner_name: str
+    meeting_title: str
+    text: str
+    due_date: datetime
+
+
+def get_nudge_candidates(
+    conn: psycopg.Connection[Any], now: datetime, cutoff: datetime
+) -> list[NudgeCandidate]:
+    """Open, overdue, assigned action items not nudged since `cutoff`
+    (normally "start of today", D66) — ownerUserId is a real assignment
+    (D59's "candidate, not assignment" caution means an LLM-only ownerName
+    never qualifies here; there's nobody real to email)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ai.id, ai.owner_user_id, u.email, u.name, m.title, ai.text, ai.due_date
+            FROM action_items ai
+            JOIN users u ON u.id = ai.owner_user_id
+            JOIN meetings m ON m.id = ai.meeting_id
+            WHERE ai.status = 'open'
+              AND ai.due_date IS NOT NULL
+              AND ai.due_date < %s
+              AND (ai.last_nudged_at IS NULL OR ai.last_nudged_at < %s)
+            """,
+            (now, cutoff),
+        )
+        rows = cur.fetchall()
+    conn.commit()
+    return [
+        NudgeCandidate(
+            id=str(r[0]),
+            owner_user_id=str(r[1]),
+            owner_email=r[2],
+            owner_name=r[3],
+            meeting_title=r[4],
+            text=r[5],
+            due_date=r[6],
+        )
+        for r in rows
+    ]
+
+
+def mark_nudged(
+    conn: psycopg.Connection[Any], action_item_ids: list[str], when: datetime
+) -> None:
+    if not action_item_ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE action_items SET last_nudged_at = %s WHERE id = ANY(%s)",
+            (when, action_item_ids),
+        )
+    conn.commit()
+
+
+# -- embeddings (3.5, D63) -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EmbeddingSegmentRow:
+    id: str
+    text: str
+
+
+def get_segments_for_embedding(
+    conn: psycopg.Connection[Any], meeting_id: str
+) -> list[EmbeddingSegmentRow]:
+    """Final (post-stitch) segment text, in no particular order — embedding
+    is per-row and order-independent, unlike the extractor's transcript
+    build which needs chronological order for the LLM prompt."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, text FROM transcript_segments WHERE meeting_id = %s",
+            (meeting_id,),
+        )
+        rows = cur.fetchall()
+    conn.commit()
+    return [EmbeddingSegmentRow(id=str(r[0]), text=r[1]) for r in rows]
+
+
+def write_embeddings(
+    conn: psycopg.Connection[Any], embeddings: list[tuple[str, list[float]]]
+) -> None:
+    """Per-segment UPDATE by id (embeddings: [(segment_id, vector), ...]).
+    Naturally idempotent under redelivery — the same text always re-embeds
+    to (approximately) the same vector, so there's no delete+insert dance
+    needed the way transcript_segments itself has (D15). psycopg has no
+    pgvector type adapter registered, so the vector rides as pgvector's own
+    text literal ("[0.1,0.2,...]") cast on the server side."""
+    if not embeddings:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE transcript_segments SET embedding = %s::vector WHERE id = %s",
+            [
+                (f"[{','.join(str(x) for x in vec)}]", seg_id)
+                for seg_id, vec in embeddings
+            ],
+        )
+    conn.commit()
 
 
 # -- transcript segments --------------------------------------------------------

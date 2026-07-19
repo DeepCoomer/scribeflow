@@ -19,6 +19,8 @@ MEETING_UPLOADED = "meeting.uploaded"
 CHUNK_TRANSCRIBE = "chunk.transcribe"
 MEETING_DIARIZE = "meeting.diarize"
 MEETING_STITCH = "meeting.stitch"
+MEETING_EXTRACT = "meeting.extract"
+MEETING_EMBED = "meeting.embed"
 
 PARKING_QUEUE = "q.parking"
 
@@ -58,12 +60,24 @@ SLICER_QUEUE = QueueSpec(name="q.slicer", bindings=(MEETING_UPLOADED,))
 TRANSCRIBER_QUEUE = QueueSpec(name="q.transcriber", bindings=(CHUNK_TRANSCRIBE,), prefetch=4)
 DIARIZER_QUEUE = QueueSpec(name="q.diarizer", bindings=(MEETING_DIARIZE,))
 STITCHER_QUEUE = QueueSpec(name="q.stitcher", bindings=(MEETING_STITCH,))
+# Phase 3 (3.1/3.2, D59): one big job per meeting (action items + summary +
+# batched sentiment), same shape as the stitcher — prefetch 1 is fine since
+# the shared Groq rate limiter (D24) is the actual concurrency control.
+EXTRACTOR_QUEUE = QueueSpec(name="q.extractor", bindings=(MEETING_EXTRACT,))
+# Ticket 3.5 (D63): embeds every transcript segment, one job per meeting,
+# published by the stitcher alongside meeting.extract — runs in parallel
+# with extraction (invariant 5's "parallel, independent finalize" shape),
+# not as part of the same job, so a slow/failed embed never blocks or
+# retries the intelligence pass.
+EMBEDDER_QUEUE = QueueSpec(name="q.embedder", bindings=(MEETING_EMBED,))
 
 WORK_QUEUES: tuple[QueueSpec, ...] = (
     SLICER_QUEUE,
     TRANSCRIBER_QUEUE,
     DIARIZER_QUEUE,
     STITCHER_QUEUE,
+    EXTRACTOR_QUEUE,
+    EMBEDDER_QUEUE,
 )
 
 

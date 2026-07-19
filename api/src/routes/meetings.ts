@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import type { AuthContext } from "../types/fastify.js";
 import {
   createMeeting,
@@ -11,9 +11,18 @@ import {
 import { listSegments } from "../db/repositories/segments.js";
 import { listSpeakers, renameSpeaker } from "../db/repositories/speakers.js";
 import { findUserById } from "../db/repositories/users.js";
+import {
+  listActionItems,
+  listActionItemsForMeeting,
+  updateActionItem,
+} from "../db/repositories/actionItems.js";
+import { getSummary, markSummaryEmailSent } from "../db/repositories/summaries.js";
+import { getLastFollowup, recordFollowupSent } from "../db/repositories/followups.js";
+import { composeDefaultFollowup } from "../lib/followup.js";
 import { ROUTING_KEYS } from "../queue/topology.js";
-import type { MeetingUploadedV1, StatusEventV1 } from "../queue/messages.js";
+import type { MeetingUploadedV1, PipelineEventV1 } from "../queue/messages.js";
 import { parseCorsOrigins } from "../lib/cors.js";
+import { startSse, sendSse } from "../lib/sse.js";
 
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // architecture.md data-flow cap
 
@@ -53,6 +62,48 @@ const renameSpeakerSchema = z.object({
   displayName: z.string().min(1).max(100),
   userId: z.string().uuid().nullable().optional(),
 });
+
+const followupSendSchema = z.object({ body: z.string().min(1).max(20_000) });
+
+const actionItemParamSchema = z.object({
+  id: z.string().uuid(),
+  itemId: z.string().uuid(),
+});
+
+// Ticket 3.3: "assign, mark done" — the LLM-extracted text/ownerName/
+// confidence are read-only from here; only the human-editable fields are
+// patchable.
+const updateActionItemSchema = z.object({
+  status: z.enum(["open", "done", "dismissed"]).optional(),
+  ownerUserId: z.string().uuid().nullable().optional(),
+  dueDate: z.coerce.date().nullable().optional(),
+});
+
+function actionItemView(item: {
+  id: string;
+  meetingId: string;
+  text: string;
+  ownerName: string | null;
+  ownerUserId: string | null;
+  dueDate: Date | null;
+  confidence: string | null;
+  status: string;
+  sourceSegmentId: string | null;
+  createdAt: Date;
+}) {
+  return {
+    id: item.id,
+    meetingId: item.meetingId,
+    text: item.text,
+    ownerName: item.ownerName,
+    ownerUserId: item.ownerUserId,
+    dueDate: item.dueDate,
+    confidence: item.confidence === null ? null : Number(item.confidence),
+    status: item.status,
+    sourceSegmentId: item.sourceSegmentId,
+    createdAt: item.createdAt,
+  };
+}
 
 function meetingView(m: NonNullable<Awaited<ReturnType<typeof findMeetingById>>>) {
   return {
@@ -205,6 +256,184 @@ export default async function meetingRoutes(app: FastifyInstance) {
     };
   });
 
+  // Ticket 3.1/3.4 — the extractor's summary + decisions, once it's run.
+  // Null (not 404) is the expected shape while extraction is still pending.
+  app.get("/meetings/:id/summary", protectedOpts, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const { tenantId } = request.auth!;
+    const meeting = await findMeetingById(app.db, tenantId, id);
+    if (!meeting) return reply.notFound();
+
+    const summary = await getSummary(app.db, tenantId, id);
+    if (!summary) return { summary: null };
+    return {
+      summary: {
+        summary: summary.summary,
+        decisions: summary.decisionsJsonb,
+        model: summary.model,
+        emailSentAt: summary.emailSentAt,
+      },
+    };
+  });
+
+  // Ticket 3.4: approval-gated send (CLAUDE.md — never auto-sent). Sends to
+  // the requesting user's own address; there's no attendee roster to fan out
+  // to before the Phase 6 calendar integration lands.
+  app.post("/meetings/:id/summary-email", protectedOpts, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const { tenantId, userId } = request.auth!;
+
+    if (!app.email) {
+      return reply.serviceUnavailable("email is not configured");
+    }
+    const meeting = await findMeetingById(app.db, tenantId, id);
+    if (!meeting) return reply.notFound();
+    const summary = await getSummary(app.db, tenantId, id);
+    if (!summary) return reply.conflict("no summary yet — extraction hasn't run");
+    const user = await findUserById(app.db, tenantId, userId);
+    if (!user) return reply.notFound();
+
+    const items = await listActionItemsForMeeting(app.db, tenantId, id);
+    const decisions = summary.decisionsJsonb as Array<{ text: string }>;
+    const text = [
+      `Summary: ${summary.summary}`,
+      "",
+      "Decisions:",
+      ...(decisions.length ? decisions.map((d) => `- ${d.text}`) : ["(none)"]),
+      "",
+      "Action items:",
+      ...(items.length
+        ? items.map((i) => `- ${i.text}${i.ownerName ? ` (${i.ownerName})` : ""}`)
+        : ["(none)"]),
+    ].join("\n");
+    const html =
+      `<p><strong>Summary:</strong> ${escapeHtml(summary.summary)}</p>` +
+      `<p><strong>Decisions:</strong></p><ul>${
+        decisions.length
+          ? decisions.map((d) => `<li>${escapeHtml(d.text)}</li>`).join("")
+          : "<li>(none)</li>"
+      }</ul>` +
+      `<p><strong>Action items:</strong></p><ul>${
+        items.length
+          ? items
+              .map(
+                (i) =>
+                  `<li>${escapeHtml(i.text)}${i.ownerName ? ` (${escapeHtml(i.ownerName)})` : ""}</li>`,
+              )
+              .join("")
+          : "<li>(none)</li>"
+      }</ul>`;
+
+    await app.email.send({
+      to: user.email,
+      subject: `Meeting summary: ${meeting.title}`,
+      text,
+      html,
+    });
+    const updated = await markSummaryEmailSent(app.db, tenantId, id);
+    return { emailSentAt: updated?.emailSentAt ?? new Date() };
+  });
+
+  // Ticket 3.7 (D65): the follow-up draft — the last body actually sent, if
+  // any (so re-editing starts from what went out, not a wiped slate), else a
+  // fresh default composed from the current summary/action items. Null
+  // (not 404) before extraction has run, same "not ready yet" shape as
+  // GET .../summary.
+  app.get("/meetings/:id/followup", protectedOpts, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const { tenantId } = request.auth!;
+    const meeting = await findMeetingById(app.db, tenantId, id);
+    if (!meeting) return reply.notFound();
+
+    const [summary, items, lastSent] = await Promise.all([
+      getSummary(app.db, tenantId, id),
+      listActionItemsForMeeting(app.db, tenantId, id),
+      getLastFollowup(app.db, tenantId, id),
+    ]);
+    if (!summary) return { followup: null };
+
+    const body =
+      lastSent?.body ??
+      composeDefaultFollowup({
+        meetingTitle: meeting.title,
+        summary: summary.summary,
+        decisions: summary.decisionsJsonb as Array<{ text: string }>,
+        actionItems: items.map((i) => ({ text: i.text, ownerName: i.ownerName })),
+      });
+    return { followup: { body, sentAt: lastSent?.sentAt ?? null } };
+  });
+
+  // Ticket 3.7: approval-gated send (CLAUDE.md — drafts, never auto-sends).
+  // The body is whatever the human last edited client-side — trusted as-is,
+  // same as any other user-authored email compose box — and sent to the
+  // requesting user's own address (no attendee roster yet, same 3.4
+  // caution).
+  app.post("/meetings/:id/followup-send", protectedOpts, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const { body } = followupSendSchema.parse(request.body);
+    const { tenantId, userId } = request.auth!;
+
+    if (!app.email) {
+      return reply.serviceUnavailable("email is not configured");
+    }
+    const meeting = await findMeetingById(app.db, tenantId, id);
+    if (!meeting) return reply.notFound();
+    const user = await findUserById(app.db, tenantId, userId);
+    if (!user) return reply.notFound();
+
+    await app.email.send({
+      to: user.email,
+      subject: `Follow-up: ${meeting.title}`,
+      text: body,
+      html: `<pre style="font-family:inherit;white-space:pre-wrap">${escapeHtml(body)}</pre>`,
+    });
+    const saved = await recordFollowupSent(app.db, tenantId, id, body);
+    return { sentAt: saved.sentAt };
+  });
+
+  // Ticket 3.3 — tenant-wide action items dashboard (across all meetings).
+  app.get("/action-items", protectedOpts, async (request) => {
+    const { tenantId } = request.auth!;
+    const rows = await listActionItems(app.db, tenantId);
+    return {
+      actionItems: rows.map((r) => ({
+        ...actionItemView(r),
+        meetingTitle: r.meetingTitle,
+      })),
+    };
+  });
+
+  app.get("/meetings/:id/action-items", protectedOpts, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const { tenantId } = request.auth!;
+    const meeting = await findMeetingById(app.db, tenantId, id);
+    if (!meeting) return reply.notFound();
+    const rows = await listActionItemsForMeeting(app.db, tenantId, id);
+    return { actionItems: rows.map(actionItemView) };
+  });
+
+  // Ticket 3.3 — "assign, mark done": ownerUserId is caller-supplied, so it
+  // gets the same cross-tenant check as the 2.6 speaker-rename endpoint
+  // before it's allowed to land on this row (D20).
+  app.patch(
+    "/meetings/:id/action-items/:itemId",
+    protectedOpts,
+    async (request, reply) => {
+      const { id, itemId } = actionItemParamSchema.parse(request.params);
+      const body = updateActionItemSchema.parse(request.body);
+      const { tenantId } = request.auth!;
+
+      if (body.ownerUserId) {
+        const owner = await findUserById(app.db, tenantId, body.ownerUserId);
+        if (!owner) return reply.badRequest("ownerUserId does not belong to this tenant");
+      }
+
+      const updated = await updateActionItem(app.db, tenantId, id, itemId, body);
+      if (!updated) return reply.notFound();
+      return actionItemView(updated);
+    },
+  );
+
   // Ticket 1.6 — live job status over SSE. EventSource cannot set an
   // Authorization header, so the JWT arrives as ?token= (D44); it's verified
   // with the same secret and the stream is scoped to the token's tenant.
@@ -231,9 +460,14 @@ export default async function meetingRoutes(app: FastifyInstance) {
       error: meeting.error,
     });
 
-    const unsubscribe = app.events.subscribe(auth.tenantId, (event: StatusEventV1) => {
+    const unsubscribe = app.events.subscribe(auth.tenantId, (event: PipelineEventV1) => {
       if (event.meeting_id !== id) return;
-      sendSse(reply, "status", {
+      // 3.1/3.2 (D59): extraction never changes meeting.status, so it gets
+      // its own SSE event name — the dashboard uses it to refetch the
+      // summary/action items without confusing it for a transcript-state
+      // transition.
+      const name = event.type === "meeting.extraction" ? "extraction" : "status";
+      sendSse(reply, name, {
         meeting_id: event.meeting_id,
         status: event.status,
         error: event.error,
@@ -251,31 +485,13 @@ export default async function meetingRoutes(app: FastifyInstance) {
   });
 }
 
-// reply.hijack() takes full control of the raw response, which means
-// @fastify/cors's onSend hook never runs for this route (it only patches
-// normal Fastify replies) — so the CORS header has to be set by hand here,
-// mirroring the same allow-list app.ts hands to the cors plugin.
-function startSse(
-  reply: FastifyReply,
-  request: FastifyRequest,
-  allowedOrigins: string[],
-) {
-  reply.hijack();
-  const origin = request.headers.origin;
-  const headers: Record<string, string> = {
-    "content-type": "text/event-stream",
-    "cache-control": "no-cache",
-    connection: "keep-alive",
-    "x-accel-buffering": "no",
-  };
-  if (origin && allowedOrigins.includes(origin)) {
-    headers["access-control-allow-origin"] = origin;
-    headers["vary"] = "Origin";
-  }
-  reply.raw.writeHead(200, headers);
-  reply.raw.write(":connected\n\n");
-}
-
-function sendSse(reply: FastifyReply, event: string, data: unknown) {
-  reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+// Ticket 3.4: the summary/action-item text going into the HTML email body is
+// LLM-extracted transcript content, not markup — escape it so a transcript
+// containing "<" or "&" can't inject into the sent email.
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

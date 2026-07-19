@@ -27,7 +27,7 @@ from scribeflow_workers import r2 as r2_module
 from scribeflow_workers.chunking import compute_chunk_plan
 from scribeflow_workers.config import Settings
 from scribeflow_workers.diarize_backends import SpeakerTurn as BackendSpeakerTurn
-from scribeflow_workers.messages import StatusEventV1
+from scribeflow_workers.messages import PipelineEventV1
 from scribeflow_workers.topology import MEETING_STITCH
 from scribeflow_workers.transcribe_backends import Segment
 
@@ -110,6 +110,9 @@ class FakeDb:
             m.chunks_done, m.total_chunks, m.diarization_done, m.status
         )
 
+    def job_exists(self, conn: Any, job_key: str) -> bool:
+        return job_key in self.jobs
+
     def get_chunk_statuses(self, conn: Any, meeting_id: str) -> dict[int, str]:
         prefix = f"{meeting_id}:transcribe:"
         return {
@@ -176,6 +179,7 @@ DB_METHODS = [
     "complete_chunk_job",
     "exhaust_chunk_job",
     "get_fan_in",
+    "job_exists",
     "get_chunk_statuses",
     "set_diarization_done",
     "insert_speaker_turns",
@@ -196,10 +200,10 @@ def wire_fake_db(monkeypatch: pytest.MonkeyPatch, fake: FakeDb) -> None:
 
 class RecordingCtx:
     def __init__(self) -> None:
-        self.events: list[StatusEventV1] = []
+        self.events: list[PipelineEventV1] = []
         self.published: list[tuple[str, Any]] = []
 
-    def publish_event(self, event: StatusEventV1) -> None:
+    def publish_event(self, event: PipelineEventV1) -> None:
         self.events.append(event)
 
     def publish(self, routing_key: str, message: Any) -> None:

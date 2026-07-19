@@ -14,7 +14,7 @@ from scribeflow_workers import r2 as r2_module
 from scribeflow_workers import slicer
 from scribeflow_workers.config import Settings
 from scribeflow_workers.framework import PermanentError
-from scribeflow_workers.messages import StatusEventV1
+from scribeflow_workers.messages import PipelineEventV1
 from scribeflow_workers.topology import CHUNK_TRANSCRIBE, MEETING_DIARIZE
 
 TENANT = "11111111-1111-4111-8111-111111111111"
@@ -36,10 +36,10 @@ def payload(**overrides: Any) -> dict[str, Any]:
 
 class FakeCtx:
     def __init__(self) -> None:
-        self.events: list[StatusEventV1] = []
+        self.events: list[PipelineEventV1] = []
         self.published: list[tuple[str, Any]] = []
 
-    def publish_event(self, event: StatusEventV1) -> None:
+    def publish_event(self, event: PipelineEventV1) -> None:
         self.events.append(event)
 
     def publish(self, routing_key: str, message: Any) -> None:
@@ -186,10 +186,10 @@ def test_any_failure_rolls_back_the_shared_connection(
 
 def test_exhausted_hook_marks_meeting_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     deps = make_deps()
-    events: list[StatusEventV1] = []
+    events: list[PipelineEventV1] = []
 
     class Ctx:
-        def publish_event(self, event: StatusEventV1) -> None:
+        def publish_event(self, event: PipelineEventV1) -> None:
             events.append(event)
 
         def publish(self, routing_key: str, message: Any) -> None:
@@ -223,7 +223,7 @@ def test_exhausted_hook_does_not_clobber_an_already_terminal_meeting(
     deps = make_deps()
 
     class Ctx:
-        def publish_event(self, event: StatusEventV1) -> None:
+        def publish_event(self, event: PipelineEventV1) -> None:
             raise AssertionError("must not publish a status event")
 
         def publish(self, routing_key: str, message: Any) -> None:

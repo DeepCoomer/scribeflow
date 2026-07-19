@@ -13,6 +13,10 @@ from typing import Any
 import psycopg
 
 GROQ_BUCKET = "groq"
+# Separate bucket for the Phase 3 LLM calls (3.1/3.2): Groq's free-tier rate
+# limits are per-model, so the extraction/sentiment quota doesn't share the
+# Whisper bucket's budget.
+GROQ_LLM_BUCKET = "groq_llm"
 
 
 def try_acquire_token(

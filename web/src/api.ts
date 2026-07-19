@@ -28,6 +28,39 @@ export type Segment = {
   startS: number;
   endS: number;
   text: string;
+  // Ticket 3.2: null until the extractor's batched sentiment pass runs.
+  sentimentLabel: "positive" | "neutral" | "negative" | null;
+  sentimentScore: number | null;
+};
+
+// Ticket 3.1: null until the extractor has run for this meeting.
+export type MeetingSummary = {
+  summary: string;
+  decisions: { text: string; source_ts_s: number | null }[];
+  model: string;
+  emailSentAt: string | null;
+};
+
+// Ticket 3.7: null until a summary exists to draft from (D65).
+export type Followup = {
+  body: string;
+  sentAt: string | null;
+};
+
+// Ticket 3.1/3.3: the LLM-extracted text/ownerName/confidence are read-only;
+// status/ownerUserId/dueDate are the human-editable "assign, mark done" bits.
+export type ActionItem = {
+  id: string;
+  meetingId: string;
+  meetingTitle?: string; // present only on the tenant-wide list
+  text: string;
+  ownerName: string | null;
+  ownerUserId: string | null;
+  dueDate: string | null;
+  confidence: number | null;
+  status: "open" | "done" | "dismissed";
+  sourceSegmentId: string | null;
+  createdAt: string;
 };
 
 // Ticket 2.6: transcript_segments.speaker is the raw diarization label
@@ -39,8 +72,35 @@ export type SpeakerInfo = {
   source: "default" | "user" | "calendar" | "voiceprint";
 };
 
+// Ticket 3.6: one retrieved excerpt backing a chat answer, in the numbered
+// order the LLM was told to cite ([1], [2], ...) — see api/src/routes/chat.ts.
+export type ChatCitation = {
+  index: number;
+  meetingId: string;
+  meetingTitle: string;
+  segmentId: string;
+  startS: number;
+};
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
+}
+
+// Ticket 3.3's "assign" action needs the caller's own user id for an
+// "assign to me" control; there's no tenant user-directory endpoint yet
+// (that's a Phase 6+ feature), so this decodes it straight out of the JWT
+// already sitting in localStorage rather than adding one for a single field.
+export function getCurrentUserId(): string | null {
+  const token = getToken();
+  if (!token) return null;
+  try {
+    const b64 = token.split(".")[1]!.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(atob(padded));
+    return typeof payload.userId === "string" ? payload.userId : null;
+  } catch {
+    return null;
+  }
 }
 
 export function setToken(token: string | null) {
@@ -114,6 +174,38 @@ export const api = {
       `/meetings/${meetingId}/speakers/${encodeURIComponent(speakerLabel)}`,
       { method: "PATCH", body: JSON.stringify({ displayName }) },
     ),
+
+  summary: (meetingId: string) =>
+    request<{ summary: MeetingSummary | null }>(`/meetings/${meetingId}/summary`),
+
+  sendSummaryEmail: (meetingId: string) =>
+    request<{ emailSentAt: string }>(`/meetings/${meetingId}/summary-email`, {
+      method: "POST",
+    }),
+
+  followup: (meetingId: string) =>
+    request<{ followup: Followup | null }>(`/meetings/${meetingId}/followup`),
+
+  sendFollowup: (meetingId: string, body: string) =>
+    request<{ sentAt: string }>(`/meetings/${meetingId}/followup-send`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    }),
+
+  meetingActionItems: (meetingId: string) =>
+    request<{ actionItems: ActionItem[] }>(`/meetings/${meetingId}/action-items`),
+
+  listActionItems: () => request<{ actionItems: ActionItem[] }>("/action-items"),
+
+  updateActionItem: (
+    meetingId: string,
+    itemId: string,
+    patch: { status?: ActionItem["status"]; ownerUserId?: string | null },
+  ) =>
+    request<ActionItem>(`/meetings/${meetingId}/action-items/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
 };
 
 // The upload itself goes browser → R2 with the presigned URL; the API never
@@ -132,4 +224,64 @@ export function meetingEventsUrl(id: string): string | null {
   const token = getToken();
   if (!token) return null;
   return `${BASE}/meetings/${id}/events?token=${encodeURIComponent(token)}`;
+}
+
+export type ChatStreamHandlers = {
+  onCitations?: (citations: ChatCitation[]) => void;
+  onToken?: (text: string) => void;
+  onDone?: () => void;
+  onError?: (message: string) => void;
+};
+
+// Ticket 3.6: POST (not EventSource) since a free-text query doesn't fit
+// safely/losslessly in a URL — see api/src/routes/chat.ts. Consuming
+// "text/event-stream" only needs a fetch() ReadableStream reader, not the
+// EventSource API specifically.
+export async function streamChat(
+  query: string,
+  handlers: ChatStreamHandlers,
+): Promise<void> {
+  const token = getToken();
+  const headers = new Headers({ "content-type": "application/json" });
+  if (token) headers.set("authorization", `Bearer ${token}`);
+
+  const res = await fetch(`${BASE}/chat`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok || !res.body) {
+    const body = (await res.json().catch(() => null)) as { message?: string } | null;
+    handlers.onError?.(body?.message ?? `${res.status} ${res.statusText}`);
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      if (frame.startsWith(":")) continue; // comment/heartbeat
+      const eventLine = frame.split("\n").find((l) => l.startsWith("event: "));
+      const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
+      if (!eventLine || !dataLine) continue;
+      const event = eventLine.slice("event: ".length);
+      const data: unknown = JSON.parse(dataLine.slice("data: ".length));
+      if (event === "citations") handlers.onCitations?.(data as ChatCitation[]);
+      else if (event === "token") handlers.onToken?.((data as { text: string }).text);
+      else if (event === "error")
+        handlers.onError?.((data as { message: string }).message);
+      else if (event === "done") {
+        handlers.onDone?.();
+        return;
+      }
+    }
+  }
+  handlers.onDone?.();
 }

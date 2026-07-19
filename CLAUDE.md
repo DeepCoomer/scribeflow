@@ -19,10 +19,28 @@ design in `docs/architecture.md` + D55–D57, impl adds `merge.py` +
 `meeting_speakers`), 2.7 (chaos tests, `test_chaos.py`), and 2.8 (pipeline
 review — 3 bugs found and fixed, D58)** — see `docs/plan.md`'s Phase 2
 status for what was verified and the model-assignment deviations (2.6 impl/
-2.7/2.8 ran on Sonnet by request). **Phase 2 is complete.** Next: Phase 3,
-ticket 3.1 (extraction worker, Opus), per `docs/plan.md`. The
-design in `docs/` is authoritative — read the relevant doc before implementing, and
-update it when reality diverges.
+2.7/2.8 ran on Sonnet by request). **Phase 2 is complete. Phase 3
+(intelligence layer) is complete** (2026-07-19) — **3.1** extraction worker
+(action items/decisions/summary, strict-JSON retry-on-invalid, D59/D60),
+**3.2** batched per-utterance sentiment riding the same job/queue (D61),
+**3.3** the action-items UI (tenant-wide + per-meeting, sentiment cues,
+transcript-timestamp links), and **3.4** the approval-gated Resend summary
+email (D62) — see `docs/plan.md`'s Phase 3 status for what was verified and
+the model-assignment deviation (all four ran on Sonnet by request,
+including 3.1 documented as Opus). **Phase 3b (agent layer) is complete**
+(2026-07-19) — **3.5** the embeddings worker (pgvector + CPU
+sentence-transformers, own queue in parallel with extraction, D63), **3.6**
+the "ask your meetings" RAG chat (transformers.js query embedding in the
+API, SSE-streamed Groq answer with numbered citations, D64), **3.7** the
+follow-up agent (template-composed draft grouped by owner, editable,
+approval-gated send, D65), and **3.8** the nudge agent (a standalone daily
+scan, once-per-day-per-owner Resend digest, D66) — see `docs/plan.md`'s
+Phase 3b status for what was verified and the model-assignment deviation
+(all four ran on Sonnet by request, including 3.6 documented as Opus).
+Next: Phase 4.1 (Postgres `utterance_metrics`, Sonnet), or Phase 5 (the Meet
+bot, the flagship) once 1.8's Oracle capacity frees up — per `docs/plan.md`.
+The design in `docs/` is authoritative — read the relevant doc before
+implementing, and update it when reality diverges.
 
 ## Read this first, per task
 

@@ -320,6 +320,113 @@ Phase 6 the rename input is free text.
 No queue-contract change: the merge rides the existing `meeting.stitch`
 message and emits no new events.
 
+## Intelligence layer (3.1/3.2, D59-D61)
+
+The stitcher publishes `meeting.extract` right after it finalizes a
+`done`/`partial` meeting (never `failed` — nothing to extract from zero
+surviving chunks). One job (`{meetingId}:extract:0`, `q.extractor`) does
+both passes ticket 3.1 and 3.2 ask for, since architecture-wise they're one
+step ("Intelligence" above) reading the same finalized transcript:
+
+1. **Action items / decisions / summary** (`extract_backends.py`'s
+   `GroqExtractionBackend.extract`): the transcript (speaker-labeled,
+   `[mm:ss]`-timestamped lines, capped at ~60k characters with the middle
+   elided past that) goes to Groq (`GROQ_LLM_MODEL`, same account as
+   Whisper, D21) in JSON mode. A response that fails to parse or fails
+   schema validation gets re-prompted in-line with the error, up to 3 total
+   attempts, before the handler raises into the normal D43 retry ladder.
+   Each action item may carry an approximate `source_ts_s`, used to link it
+   to its nearest transcript segment (60 s tolerance; no match beyond that)
+   for the "jump to transcript" UI — advisory only, no FK (D60).
+2. **Per-utterance sentiment** (`score_sentiment`): segments batched 40 at a
+   time, each batch scored `{segment_id, label, score}` with the same
+   retry-on-invalid shape as (1).
+
+Both passes share the extractor's own Groq rate-limiter bucket (`groq_llm`,
+D24-style, separate from Whisper's since Groq's free-tier limits are
+per-model). An empty transcript (D48's "empty is a success") skips the LLM
+call entirely and writes a trivial summary. Writes land in one transaction:
+`action_items` is replaced by meeting (delete + reinsert, same idempotency
+argument as `replace_segments`, D15); `meeting_summaries` is upserted by
+`meeting_id` (`ON CONFLICT (meeting_id) DO UPDATE`, D60 — a summary has no
+natural per-row identity to replace-by-delete); sentiment is a per-segment
+`UPDATE`, trivially idempotent. Extraction is an enhancement, not part of
+the pipeline's terminal-status contract: a meeting that exhausts extraction
+retries stays whatever the stitcher already set it to (`done`/`partial`),
+and the extractor instead publishes an `ExtractionEventV1` (`type:
+"meeting.extraction"`, its own SSE event name — never `meeting.status`,
+since extraction never changes that) so the dashboard knows to
+refetch the summary/action items once they're ready.
+
+**Summary email (3.4, D62).** `POST /meetings/:id/summary-email` composes
+the summary + decisions + action items into an email and sends it via
+Resend (plain `fetch`, no SDK) to the requesting user's own address —
+approval-gated (CLAUDE.md), never sent automatically when extraction
+finishes, and 503s if `RESEND_API_KEY` isn't configured (same pattern as R2
+disabling the upload endpoints).
+
+## Agent layer (3.5-3.8, D63-D66)
+
+**Embeddings (3.5, D63).** The stitcher publishes `meeting.embed` alongside
+`meeting.extract` — same trigger condition (anything not `failed`), same
+"independent parallel fan-out" shape invariant 5 already uses for
+diarization/transcription, so a slow or failed embed pass never blocks or
+retries the intelligence pass. One job (`{meetingId}:embed:0`, `q.embedder`)
+embeds every surviving segment's text with a local CPU model
+(`sentence-transformers/all-MiniLM-L6-v2`, D19) and writes
+`transcript_segments.embedding vector(384)` with a per-segment `UPDATE` —
+trivially idempotent, no delete+insert dance needed. Best-effort, not part
+of the terminal-status contract: a segment that never got embedded (pass
+never ran, or exhausted retries) simply can't be retrieved by the chat
+below. Requires the `pgvector/pgvector:pg16` Postgres image (D63) and an
+HNSW index (`vector_cosine_ops`) added by hand in the migration SQL, since
+neither the vector column type nor the index's operator class are
+expressible through drizzle-kit's schema builder.
+
+**"Ask your meetings" RAG chat (3.6, D64).** `POST /chat` (SSE response, not
+an EventSource `GET` — D44's query-in-URL trick doesn't fit a free-text
+question):
+
+1. Embed the query in-process with transformers.js (`Xenova/all-MiniLM-L6-v2`,
+   the ONNX port of the same weights 3.5 uses) — no second service, no
+   cross-language call, same vector space as the stored embeddings (D64).
+2. Retrieve the tenant's closest segments via raw SQL (`ts.embedding <=>
+$query::vector`, joined through `meetings` for the tenant scope, D20) —
+   pgvector's operator isn't expressible through the query builder, same
+   reasoning as the HNSW index above.
+3. Stream an SSE `citations` event (numbered, each with meeting id/title,
+   segment id, timestamp) immediately, then `token` events as Groq
+   (`GROQ_LLM_MODEL`, same account as extraction) streams its answer — the
+   system prompt tells it to cite `[1]`/`[2]` inline, but the frontend's
+   clickable links come from the retrieval data directly, never parsed out
+   of the LLM's prose.
+4. A `done` event closes the stream; zero retrieved segments skips the LLM
+   entirely and returns a fixed "couldn't find anything" token.
+
+503s if `GROQ_API_KEY` isn't configured (same pattern as R2/email); the
+query embedder itself needs no key.
+
+**Follow-up agent (3.7, D65).** `GET /meetings/:id/followup` returns the
+last-sent body if one exists, else a fresh default composed by template
+(grouped by owner — `lib/followup.ts`, no LLM call: 3.1 already extracted
+everything it needs, and a human edits this before sending anyway).
+`POST /meetings/:id/followup-send` sends the user-edited body via the same
+Resend integration as 3.4 and upserts `meeting_followups` by `meeting_id` —
+approval-gated (CLAUDE.md invariant 7), never automatic, 503s without
+`RESEND_API_KEY`.
+
+**Nudge agent (3.8, D66).** `nudger.py` is a standalone sleep-loop script
+(cron-shaped, not message-driven — no queue, no `framework.Worker`) that
+once a day scans for `action_items` that are `open`, past `due_date`, have a
+real `owner_user_id` (never an LLM-only `owner_name` — D56/D59's "candidate,
+not assignment" caution), and haven't been nudged since the start of today.
+It groups by owner and sends one Resend digest per owner, advancing
+`last_nudged_at` only for owners whose send succeeded (a bad address for one
+owner doesn't block or get retried-away for everyone else). No
+`RESEND_API_KEY` means the scan is a no-op (logs candidates, sends nothing);
+the action-items dashboard's overdue styling needs none of this — it's a
+pure client-side computation over each item's existing due date.
+
 ## Queue topology
 
 ```
@@ -329,6 +436,7 @@ exchange: pipeline (topic)
   meeting.diarize    → q.diarizer        (prefetch 1 — CPU-bound)
   meeting.stitch     → q.stitcher
   meeting.extract    → q.extractor
+  meeting.embed      → q.embedder        (3.5, D63 — parallel with extract)
 exchange: events (fanout) → per-API-instance exclusive queue (SSE forwarding)
 each work queue → tiered retry queues (30s/2m/10m TTL), then q.parking
 ```
@@ -367,7 +475,13 @@ meetings(id, tenant_id, title, calendar_event_id, meet_url, started_at,
          duration_s, status, r2_key, total_chunks, chunks_done,
          diarization_done, diarization_error, error)
 transcript_segments(id, meeting_id, chunk_idx, speaker, start_s, end_s,
-                    text, words_jsonb)
+                    text, words_jsonb, sentiment_label, sentiment_score,
+                    embedding)
+                    -- sentiment_* written by the 3.2 extractor pass; null
+                    -- until it runs (D61). embedding vector(384), written by
+                    -- the 3.5 embedder pass; null until it runs (D63) --
+                    -- HNSW index (vector_cosine_ops) added by hand in the
+                    -- migration SQL, not declared in schema.ts
 transcript_gaps(id, meeting_id, start_s, end_s, reason)   -- written at stitch (D49)
 speaker_turns(id, meeting_id, speaker_label, start_s, end_s)  -- raw pyannote (2.5);
                                                                -- read by the 2.6 merge and
@@ -375,8 +489,21 @@ speaker_turns(id, meeting_id, speaker_label, start_s, end_s)  -- raw pyannote (2
 meeting_speakers(id, meeting_id, speaker_label, display_name,  -- label → name map (D56);
                  user_id, source)                              -- seeded at stitch, edited
                                                                -- via the rename endpoint
-action_items(id, meeting_id, tenant_id, text, owner_user_id, due_date,
-             confidence, status, source_segment_id)
+action_items(id, meeting_id, tenant_id, text, owner_name, owner_user_id,
+             due_date, confidence, status, source_segment_id, last_nudged_at)
+             -- owner_name: LLM-extracted candidate (3.1), never
+             -- auto-resolved to owner_user_id (D60); source_segment_id has
+             -- no FK (D60) -- advisory "jump to transcript" link only.
+             -- last_nudged_at: set by the 3.8 nudger only on a successful
+             -- send, compared against "start of today" (D66)
+meeting_summaries(id, tenant_id, meeting_id, summary, decisions_jsonb,
+                   model, email_sent_at)  -- upserted by meeting_id (3.1,
+                                          -- D60); email_sent_at null until
+                                          -- the approval-gated 3.4 send
+meeting_followups(id, tenant_id, meeting_id, body, sent_at)
+                   -- upserted by meeting_id (3.7, D65); body is the last
+                   -- actually-sent (possibly human-edited) draft, not a
+                   -- regenerable default
 bot_sessions(id, meeting_id, container_id, state, joined_at, left_at, error)
 ```
 

@@ -36,6 +36,20 @@
       "when": 1784451046066,
       "tag": "0004_even_tinkerer",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784456590110,
+      "tag": "0005_sharp_wither",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784465270176,
+      "tag": "0006_phase3b_embeddings_followups_nudges",
+      "breakpoints": true
     }
   ]
 }

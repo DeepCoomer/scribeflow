@@ -11,7 +11,28 @@ import {
   index,
   uniqueIndex,
   pgEnum,
+  customType,
 } from "drizzle-orm/pg-core";
+
+// pgvector (ticket 3.5, D63): drizzle-orm has no built-in vector type, so
+// this is the standard customType shim — pgvector's text I/O format
+// ("[0.1,0.2,...]") happens to already be valid JSON array syntax, so
+// fromDriver can just JSON.parse it. 384 dims matches
+// sentence-transformers/all-MiniLM-L6-v2 (workers/embed_backends.py) and
+// Xenova/all-MiniLM-L6-v2 (the API's query-time embedding, api/src/lib/
+// embeddings.ts) — both are ONNX/torch exports of the same weights, so the
+// two sides land in the same vector space.
+const vector384 = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return "vector(384)";
+  },
+  toDriver(value) {
+    return `[${value.join(",")}]`;
+  },
+  fromDriver(value) {
+    return JSON.parse(value) as number[];
+  },
+});
 
 // --- tenants -----------------------------------------------------------
 // The root of tenant scoping (D20). Every other table below either carries
@@ -156,6 +177,12 @@ export const actionItems = pgTable(
       .notNull()
       .references(() => meetings.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    // Free-text owner name the extractor read off the transcript (a speaker
+    // display name, most often) — never auto-resolved to a real account (D59,
+    // same "candidate, not assignment" caution as D56's calendar names).
+    // ownerUserId is the real assignment, set only via the 3.3 UI's explicit
+    // "assign" action.
+    ownerName: text("owner_name"),
     ownerUserId: uuid("owner_user_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -163,10 +190,19 @@ export const actionItems = pgTable(
     // 0..1 LLM extraction confidence; drives review-queue triage later.
     confidence: numeric("confidence", { precision: 3, scale: 2 }),
     status: actionItemStatusEnum("status").notNull().default("open"),
-    // Points at a transcript_segments row once Phase 1 lands; no FK yet
-    // because that table doesn't exist in this migration.
+    // Advisory nearest-segment link for the "jump to transcript" UI (D59):
+    // no FK by design, since a re-stitch deletes and reinserts
+    // transcript_segments with new ids (D11/D49) and would silently orphan
+    // any FK-constrained reference. A dangling id here just means the UI
+    // link 404s harmlessly.
     sourceSegmentId: uuid("source_segment_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Ticket 3.8: set by the nudger's daily scan when it actually sends an
+    // owner a digest email for this item — compared against "start of
+    // today" (not just "is it null") so an item stays nudge-eligible once
+    // per day for as long as it's open and overdue, instead of only ever
+    // once (D66).
+    lastNudgedAt: timestamp("last_nudged_at", { withTimezone: true }),
   },
   // Backs the action-items dashboard ("open items for tenant X") and the
   // Phase 3b nudge agent's daily scan (open + past due), per 0.6 review.
@@ -194,6 +230,19 @@ export const transcriptSegments = pgTable(
     endS: doublePrecision("end_s").notNull(),
     text: text("text").notNull(),
     wordsJsonb: jsonb("words_jsonb"),
+    // Ticket 3.2: per-utterance sentiment, written by the extractor worker's
+    // batched sentiment pass after the transcript is final. Null until that
+    // pass runs (or if it never does — sentiment is best-effort, not part of
+    // the pipeline's terminal-status contract). -1..1, negative to positive.
+    sentimentLabel: text("sentiment_label"),
+    sentimentScore: doublePrecision("sentiment_score"),
+    // Ticket 3.5 (D63): written by the embedder worker once per segment,
+    // null until that best-effort pass runs (same "enhancement, not part of
+    // the terminal-status contract" shape as sentiment above). The cosine
+    // HNSW index this needs (`vector_cosine_ops`) isn't expressible through
+    // drizzle-kit's index builder, so it's hand-added in the migration SQL
+    // instead of declared here — see api/drizzle/0006_*.sql.
+    embedding: vector384("embedding"),
   },
   (t) => [
     // The viewer reads a whole meeting ordered by time; the idempotent
@@ -269,6 +318,60 @@ export const meetingSpeakers = pgTable(
   (t) => [
     uniqueIndex("meeting_speakers_meeting_label_idx").on(t.meetingId, t.speakerLabel),
   ],
+);
+
+// --- meeting_summaries ---------------------------------------------------
+// One row per meeting (ticket 3.1, D59): the extractor's summary + decisions
+// pass, upserted by meeting_id so a redelivered meeting.extract job overwrites
+// rather than duplicates (idempotency, D15) — unlike action_items, a summary
+// has no natural per-row identity to replace-by-delete, so upsert is the
+// right shape here instead of the delete+insert pattern used elsewhere.
+// emailSentAt is null until a human clicks "send" (CLAUDE.md: approval-gated
+// email, never auto-sent) via the 3.4 endpoint.
+
+export const meetingSummaries = pgTable(
+  "meeting_summaries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    meetingId: uuid("meeting_id")
+      .notNull()
+      .references(() => meetings.id, { onDelete: "cascade" }),
+    summary: text("summary").notNull(),
+    decisionsJsonb: jsonb("decisions_jsonb").notNull(),
+    model: text("model").notNull(),
+    emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("meeting_summaries_meeting_idx").on(t.meetingId)],
+);
+
+// --- meeting_followups ---------------------------------------------------
+// Ticket 3.7: the human-in-the-loop follow-up email (CLAUDE.md — drafts,
+// never auto-sends). Unlike meeting_summaries there's no separate "draft"
+// state to persist: the API composes a default draft on GET from the
+// existing summary/action-items data (no extra LLM call, D65), the user
+// edits it client-side, and only the body that actually got sent is
+// recorded here — upserted by meeting_id (one row per meeting, same
+// replace-on-resend shape as meeting_summaries.emailSentAt).
+
+export const meetingFollowups = pgTable(
+  "meeting_followups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    meetingId: uuid("meeting_id")
+      .notNull()
+      .references(() => meetings.id, { onDelete: "cascade" }),
+    body: text("body").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("meeting_followups_meeting_idx").on(t.meetingId)],
 );
 
 // --- rate_limiter_buckets ---------------------------------------------------

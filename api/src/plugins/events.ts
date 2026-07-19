@@ -1,14 +1,14 @@
 import fp from "fastify-plugin";
 import type { FastifyInstance } from "fastify";
-import { statusEventV1, type StatusEventV1 } from "../queue/messages.js";
+import { pipelineEventV1, type PipelineEventV1 } from "../queue/messages.js";
 
-export type EventSubscriber = (event: StatusEventV1) => void;
+export type EventSubscriber = (event: PipelineEventV1) => void;
 
 export type Events = {
   /** Returns an unsubscribe function. */
   subscribe: (tenantId: string, fn: EventSubscriber) => () => void;
   /** Local dispatch — used by the queue consumer and directly by tests. */
-  dispatch: (event: StatusEventV1) => void;
+  dispatch: (event: PipelineEventV1) => void;
 };
 
 // Per-tenant SSE subscriber registry (ticket 1.6). Workers publish state
@@ -42,7 +42,7 @@ export default fp(async function eventsPlugin(app: FastifyInstance) {
   app.decorate("events", events);
 
   app.queue.onEvent((raw) => {
-    const parsed = statusEventV1.safeParse(raw);
+    const parsed = pipelineEventV1.safeParse(raw);
     if (!parsed.success) {
       app.log.warn({ raw }, "ignoring unrecognized event message");
       return;

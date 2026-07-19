@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import amqplib from "amqplib";
 import { loadEnv } from "../config.js";
 import { buildApp } from "../app.js";
-import { meetingSpeakers, transcriptSegments } from "../db/schema.js";
+import {
+  actionItems,
+  meetingSpeakers,
+  meetingSummaries,
+  transcriptSegments,
+} from "../db/schema.js";
 import { SLICER_QUEUE } from "../queue/topology.js";
 import { meetingUploadedV1 } from "../queue/messages.js";
 
@@ -358,4 +363,309 @@ describe("job status SSE (1.6)", () => {
 
     controller.abort();
   }, 15_000);
+});
+
+describe("intelligence layer (3.1-3.4)", () => {
+  it("returns null before extraction has run", async () => {
+    const meetingId = await createMeeting();
+    const res = await app.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/summary`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ summary: null });
+  });
+
+  it("returns the extractor's summary once written", async () => {
+    const meetingId = await createMeeting();
+    await app.db.insert(meetingSummaries).values({
+      tenantId,
+      meetingId,
+      summary: "Discussed the roadmap.",
+      decisionsJsonb: [{ text: "Ship Friday", source_ts_s: 12 }],
+      model: "llama-3.3-70b-versatile",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/summary`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().summary).toMatchObject({
+      summary: "Discussed the roadmap.",
+      decisions: [{ text: "Ship Friday", source_ts_s: 12 }],
+      model: "llama-3.3-70b-versatile",
+      emailSentAt: null,
+    });
+  });
+
+  it("lists action items per-meeting and tenant-wide, and lets a human assign/complete one", async () => {
+    const meetingId = await createMeeting();
+    const [item] = await app.db
+      .insert(actionItems)
+      .values({
+        tenantId,
+        meetingId,
+        text: "Send the doc",
+        ownerName: "Alice",
+        confidence: "0.90",
+      })
+      .returning();
+
+    const perMeeting = await app.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/action-items`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(perMeeting.statusCode).toBe(200);
+    expect(perMeeting.json().actionItems).toMatchObject([
+      { text: "Send the doc", ownerName: "Alice", status: "open", confidence: 0.9 },
+    ]);
+
+    const tenantWide = await app.inject({
+      method: "GET",
+      url: "/action-items",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(tenantWide.statusCode).toBe(200);
+    expect(tenantWide.json().actionItems).toMatchObject([
+      { text: "Send the doc", meetingTitle: "Weekly sync" },
+    ]);
+
+    const patchRes = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/action-items/${item!.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { status: "done" },
+    });
+    expect(patchRes.statusCode).toBe(200);
+    expect(patchRes.json().status).toBe("done");
+  });
+
+  it("rejects an ownerUserId that does not belong to the caller's tenant (D20)", async () => {
+    const meetingId = await createMeeting();
+    const [item] = await app.db
+      .insert(actionItems)
+      .values({ tenantId, meetingId, text: "Send the doc" })
+      .returning();
+    const other = await registerUser(app, `foreign-owner-${Date.now()}@example.com`);
+    const otherPayload = JSON.parse(
+      Buffer.from(other.token.split(".")[1]!, "base64url").toString(),
+    );
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/action-items/${item!.id}`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { ownerUserId: otherPayload.userId },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("404s patching an action item that belongs to another tenant's meeting", async () => {
+    const meetingId = await createMeeting();
+    const [item] = await app.db
+      .insert(actionItems)
+      .values({ tenantId, meetingId, text: "Send the doc" })
+      .returning();
+    const other = await registerUser(app, `other-tenant-patch-${Date.now()}@example.com`);
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/meetings/${meetingId}/action-items/${item!.id}`,
+      headers: { authorization: `Bearer ${other.token}` },
+      payload: { status: "done" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("503s the summary-email endpoint when Resend isn't configured", async () => {
+    const meetingId = await createMeeting();
+    await app.db.insert(meetingSummaries).values({
+      tenantId,
+      meetingId,
+      summary: "x",
+      decisionsJsonb: [],
+      model: "llama-3.3-70b-versatile",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/meetings/${meetingId}/summary-email`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(503);
+  });
+
+  it("409s the summary-email endpoint before extraction has run", async () => {
+    const emailEnv = { ...env, RESEND_API_KEY: "test-resend-key" };
+    const emailApp = await buildApp(emailEnv);
+    const { token: emailToken } = await registerUser(
+      emailApp,
+      `no-summary-${Date.now()}@example.com`,
+    );
+    const meetingRes = await emailApp.inject({
+      method: "POST",
+      url: "/meetings",
+      headers: { authorization: `Bearer ${emailToken}` },
+      payload: { title: "No summary yet" },
+    });
+    const meetingId = meetingRes.json().id;
+
+    const res = await emailApp.inject({
+      method: "POST",
+      url: `/meetings/${meetingId}/summary-email`,
+      headers: { authorization: `Bearer ${emailToken}` },
+    });
+    expect(res.statusCode).toBe(409);
+    await emailApp.close();
+  });
+
+  it("sends the summary via Resend and records emailSentAt (3.4, approval-gated)", async () => {
+    const emailEnv = { ...env, RESEND_API_KEY: "test-resend-key" };
+    const emailApp = await buildApp(emailEnv);
+    const { token: emailToken, tenantId: emailTenantId } = await registerUser(
+      emailApp,
+      `send-summary-${Date.now()}@example.com`,
+    );
+    const meetingRes = await emailApp.inject({
+      method: "POST",
+      url: "/meetings",
+      headers: { authorization: `Bearer ${emailToken}` },
+      payload: { title: "Weekly sync" },
+    });
+    const meetingId = meetingRes.json().id;
+    await emailApp.db.insert(meetingSummaries).values({
+      tenantId: emailTenantId,
+      meetingId,
+      summary: "Discussed <the> roadmap.",
+      decisionsJsonb: [{ text: "Ship Friday" }],
+      model: "llama-3.3-70b-versatile",
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+
+    const res = await emailApp.inject({
+      method: "POST",
+      url: `/meetings/${meetingId}/summary-email`,
+      headers: { authorization: `Bearer ${emailToken}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().emailSentAt).toBeTruthy();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.resend.com/emails",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    expect(body.subject).toContain("Weekly sync");
+    // The transcript-derived summary text is HTML-escaped in the email body.
+    expect(body.html).toContain("&lt;the&gt;");
+
+    fetchSpy.mockRestore();
+    await emailApp.close();
+  });
+});
+
+describe("follow-up email (3.7, D65)", () => {
+  it("returns null before extraction has run", async () => {
+    const meetingId = await createMeeting();
+    const res = await app.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/followup`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ followup: null });
+  });
+
+  it("composes a default draft grouped by owner, then lets it be edited and sent", async () => {
+    const emailEnv = { ...env, RESEND_API_KEY: "test-resend-key" };
+    const emailApp = await buildApp(emailEnv);
+    const { token: emailToken, tenantId: emailTenantId } = await registerUser(
+      emailApp,
+      `followup-${Date.now()}@example.com`,
+    );
+    const meetingRes = await emailApp.inject({
+      method: "POST",
+      url: "/meetings",
+      headers: { authorization: `Bearer ${emailToken}` },
+      payload: { title: "Roadmap sync" },
+    });
+    const meetingId = meetingRes.json().id;
+    await emailApp.db.insert(meetingSummaries).values({
+      tenantId: emailTenantId,
+      meetingId,
+      summary: "Discussed the roadmap.",
+      decisionsJsonb: [{ text: "Ship Friday" }],
+      model: "llama-3.3-70b-versatile",
+    });
+    await emailApp.db.insert(actionItems).values({
+      tenantId: emailTenantId,
+      meetingId,
+      text: "Write the doc",
+      ownerName: "Alice",
+      confidence: "0.90",
+    });
+
+    const draftRes = await emailApp.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/followup`,
+      headers: { authorization: `Bearer ${emailToken}` },
+    });
+    expect(draftRes.statusCode).toBe(200);
+    const draft = draftRes.json().followup as { body: string; sentAt: string | null };
+    expect(draft.sentAt).toBeNull();
+    expect(draft.body).toContain("Roadmap sync");
+    expect(draft.body).toContain("Alice:\n  - Write the doc");
+
+    const editedBody = draft.body + "\n\nP.S. great meeting!";
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+
+    const sendRes = await emailApp.inject({
+      method: "POST",
+      url: `/meetings/${meetingId}/followup-send`,
+      headers: { authorization: `Bearer ${emailToken}` },
+      payload: { body: editedBody },
+    });
+    expect(sendRes.statusCode).toBe(200);
+    expect(sendRes.json().sentAt).toBeTruthy();
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    const sentBody = JSON.parse(init.body as string);
+    expect(sentBody.subject).toContain("Roadmap sync");
+    expect(sentBody.text).toContain("P.S. great meeting!");
+
+    // A second GET now returns the edited, actually-sent body — not a fresh
+    // recompute of the default — so re-editing starts from what went out.
+    const afterSendRes = await emailApp.inject({
+      method: "GET",
+      url: `/meetings/${meetingId}/followup`,
+      headers: { authorization: `Bearer ${emailToken}` },
+    });
+    const afterSend = afterSendRes.json().followup as {
+      body: string;
+      sentAt: string | null;
+    };
+    expect(afterSend.sentAt).toBeTruthy();
+    expect(afterSend.body).toBe(editedBody);
+
+    fetchSpy.mockRestore();
+    await emailApp.close();
+  });
+
+  it("503s the follow-up send endpoint when Resend isn't configured", async () => {
+    const meetingId = await createMeeting();
+    const res = await app.inject({
+      method: "POST",
+      url: `/meetings/${meetingId}/followup-send`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { body: "hello" },
+    });
+    expect(res.statusCode).toBe(503);
+  });
 });

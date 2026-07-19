@@ -37,3 +37,26 @@ export const statusEventV1 = z.object({
 });
 
 export type StatusEventV1 = z.infer<typeof statusEventV1>;
+
+// Published by the extractor worker (3.1/3.2, D59) once its job reaches a
+// terminal state. Separate from statusEventV1 because extraction never
+// changes meetings.status — a stitched transcript is already done/partial
+// whether or not the intelligence pass has finished yet.
+export const extractionEventV1 = z.object({
+  v: z.literal(1),
+  type: z.literal("meeting.extraction"),
+  tenant_id: z.string().uuid(),
+  meeting_id: z.string().uuid(),
+  status: z.enum(["done", "failed"]),
+  error: z.string().nullable(),
+  ts: z.string(),
+});
+
+export type ExtractionEventV1 = z.infer<typeof extractionEventV1>;
+
+export const pipelineEventV1 = z.discriminatedUnion("type", [
+  statusEventV1,
+  extractionEventV1,
+]);
+
+export type PipelineEventV1 = z.infer<typeof pipelineEventV1>;

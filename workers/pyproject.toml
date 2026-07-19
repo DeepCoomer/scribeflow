@@ -10,6 +10,10 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "boto3>=1.35",
     "groq>=0.15",
+    # Ticket 3.8: the nudger's single Resend POST (no SDK needed, same
+    # reasoning as api/src/lib/email.ts) — already a transitive dep of groq,
+    # promoted to direct since we now import it ourselves.
+    "httpx>=0.27",
 ]
 
 # pyannote.audio (+ torch) is a multi-GB transitive install; kept out of the
@@ -18,6 +22,9 @@ dependencies = [
 # explicitly (workers/Dockerfile).
 [project.optional-dependencies]
 diarize = ["pyannote.audio>=3.1"]
+# sentence-transformers (+ torch) for the embedder (ticket 3.5, D63); same
+# "own extra, lazily imported" reasoning as `diarize` above.
+embed = ["sentence-transformers>=3.0"]
 
 [dependency-groups]
 dev = ["pytest>=8.3", "ruff>=0.8", "mypy>=1.14"]
@@ -34,7 +41,17 @@ strict = true
 # isn't installed by default (see the `diarize` extra above) so mypy never
 # sees real stubs for it either.
 [[tool.mypy.overrides]]
-module = ["pika", "pika.*", "boto3", "boto3.*", "botocore.*", "pyannote", "pyannote.*"]
+module = [
+    "pika",
+    "pika.*",
+    "boto3",
+    "boto3.*",
+    "botocore.*",
+    "pyannote",
+    "pyannote.*",
+    "sentence_transformers",
+    "sentence_transformers.*",
+]
 ignore_missing_imports = true
 
 [build-system]
@@ -49,3 +66,6 @@ slicer = "scribeflow_workers.slicer:main"
 transcriber = "scribeflow_workers.transcriber:main"
 diarizer = "scribeflow_workers.diarizer:main"
 stitcher = "scribeflow_workers.stitcher:main"
+extractor = "scribeflow_workers.extractor:main"
+embedder = "scribeflow_workers.embedder:main"
+nudger = "scribeflow_workers.nudger:main"

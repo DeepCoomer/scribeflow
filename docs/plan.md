@@ -1,6 +1,6 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-19 (Phase 2 complete)_
+_Last updated: 2026-07-19 (Phase 3b complete)_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
@@ -131,8 +131,11 @@ complete.** Deviation from the model-strategy table: 2.6's implementation
 half, 2.7, and 2.8 were all run as **Sonnet** by explicit user request
 (2.6's design half stayed on Fable as planned) — noted here rather than
 changing the table, since Opus/Fable stay the documented defaults for this
-shape of ticket going forward. Next: Phase 3 (3.1, intelligence-layer
-extraction worker, Opus)._
+shape of ticket going forward. **Phase 3 is also complete, and so is Phase
+3b** (see their own status notes below) — next up is Phase 4.1 (Postgres
+`utterance_metrics`, Sonnet) per the stretch-phase note, though Phase 5 (the
+Meet bot) is the flagship and can jump the queue once Oracle capacity frees
+up for 1.8._
 
 | #   | Ticket                                                                                                                                                              | Model                            |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
@@ -147,21 +150,84 @@ extraction worker, Opus)._
 
 ### Phase 3 — Intelligence layer
 
-| #   | Ticket                                                                                                                                                   | Model    |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| 3.1 | Prompt + extraction worker: action items (owner, due date, confidence), decisions, summary via Groq LLM; strict JSON schema output with retry-on-invalid | **Opus** |
-| 3.2 | Per-utterance sentiment scoring (batched LLM calls)                                                                                                      | Sonnet   |
-| 3.3 | Action-items UI: list, assign, mark done, link to transcript timestamp                                                                                   | Sonnet   |
-| 3.4 | Meeting summary email (optional, via free Resend tier or skip)                                                                                           | Sonnet   |
+_Status: **3.1-3.4 done** (2026-07-19), design + impl in one session. **3.1**
+adds `q.extractor`/`meeting.extract` (stitcher-triggered on `done`/`partial`,
+never `failed`), `extract_backends.py` (Groq JSON-mode extraction with a
+retry-on-invalid reprompt loop, up to 3 attempts), `meeting_summaries`
+(upsert-by-meeting) and `action_items.owner_name` (an LLM candidate, never
+auto-resolved to `owner_user_id`) — D59/D60. **3.2** (per-utterance
+sentiment) rides the same job/queue as 3.1 rather than a separate stage —
+batched Groq calls write new `transcript_segments.sentiment_label`/
+`sentiment_score` columns (D61). **3.3** adds the tenant-wide
+`/action-items` dashboard page plus per-meeting action items and sentiment
+cues on the meeting detail page, with an "assign to me" control standing in
+for a full user picker (no tenant user-directory endpoint exists yet — a
+real assign-to-any-teammate UI fits better once Phase 6 needs one anyway).
+**3.4** sends the summary/action items via Resend only on explicit user
+click (`POST /meetings/:id/summary-email`, 503s without `RESEND_API_KEY`) —
+approval-gated per CLAUDE.md's project description, and to the requesting
+user only (no attendee roster before Phase 6). All four tickets ran on
+**Sonnet** by explicit user request, including 3.1 (documented as Opus
+above) — noted here rather than changing the table, the same deviation
+pattern as 2.6 impl/2.7/2.8 (Opus stays the documented default for this
+shape of ticket going forward). Verified: workers ruff/mypy/pytest (108
+tests) and API lint/typecheck/vitest (22 tests) all green; live-smoke-tested
+against a real Postgres + RabbitMQ + running API/web dev servers (registered
+a tenant, seeded a transcript/summary/action items, hit every new endpoint
+over HTTP, confirmed response shapes match the frontend's types exactly) —
+the React UI itself wasn't visually verified in a browser, since no
+browser-automation tool was available this session._
+
+| #   | Ticket                                                                                                                                                   | Model                 |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| 3.1 | Prompt + extraction worker: action items (owner, due date, confidence), decisions, summary via Groq LLM; strict JSON schema output with retry-on-invalid | **Opus** (ran Sonnet) |
+| 3.2 | Per-utterance sentiment scoring (batched LLM calls)                                                                                                      | Sonnet                |
+| 3.3 | Action-items UI: list, assign, mark done, link to transcript timestamp                                                                                   | Sonnet                |
+| 3.4 | Meeting summary email (optional, via free Resend tier or skip)                                                                                           | Sonnet                |
 
 ### Phase 3b — Agent layer ("meeting chief of staff")
 
-| #   | Ticket                                                                                                                                                                                   | Model    |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| 3.5 | Embeddings: pgvector + sentence-transformers (CPU, free) worker embedding every transcript segment on finalize                                                                           | Sonnet   |
-| 3.6 | "Ask your meetings" RAG chat: retrieval (pgvector) + Groq LLM answer with citations linking to meeting + timestamp; SSE-streamed                                                         | **Opus** |
-| 3.7 | Follow-up agent: after each meeting, draft a follow-up email (summary + action items per owner) shown in dashboard for one-click approve/edit/send — human-in-the-loop, never auto-sends | Sonnet   |
-| 3.8 | Nudge agent: daily cron scans open action items past due, notifies owners (dashboard + optional email digest)                                                                            | Sonnet   |
+_Status: **3.5-3.8 done** (2026-07-19), design + impl in one session, same
+shape as Phase 3. **3.5** adds `q.embedder`/`meeting.embed` (stitcher-
+triggered in parallel with `meeting.extract`, not folded into it),
+`embed_backends.py` (CPU sentence-transformers), and
+`transcript_segments.embedding vector(384)` with a hand-added HNSW index —
+requires the `pgvector/pgvector:pg16` Postgres image (D63). **3.6** adds
+`POST /chat`: transformers.js/ONNX query embedding in-process in the API
+(no second service, D64), raw-SQL pgvector retrieval scoped through
+`meetings` (D20), and an SSE-streamed Groq answer with numbered citations
+resolved from retrieval data (never parsed out of the LLM's prose) — a
+`#/chat` dashboard page renders it token-by-token with clickable citation
+links. **3.7** adds `meeting_followups` and two endpoints: a default
+follow-up draft grouped by owner, composed by template rather than a second
+LLM call (D65 — 3.1 already extracted everything it needs, and the human
+edits it before sending anyway), and an approval-gated send that upserts
+the actually-sent body so re-editing starts from history, not a
+regenerated slate; a new "Follow-up email" section on the meeting detail
+page makes it editable before send. **3.8** adds `nudger.py`, a standalone
+daily sleep-loop (not a queue worker — no trigger event to bind to, D66)
+that emails one Resend digest per owner for open, overdue, *assigned*
+(never LLM-only `owner_name`) action items, throttled to once/day via a new
+`action_items.last_nudged_at` column; the action-items dashboard's overdue
+styling is a pure client computation independent of whether that email ever
+sends. Deviation from the model-strategy table: all four ran on **Sonnet**
+by explicit user request, including 3.6 (documented as Opus above) — noted
+here rather than changing the table, the same deviation pattern as 2.6
+impl/2.7/2.8 and all of Phase 3 (Opus stays the documented default for this
+shape of ticket going forward). Verified: workers ruff/mypy/pytest (117
+tests) and API lint/typecheck/vitest (30 tests) all green; live-smoke-tested
+against a real Postgres (recreated on `pgvector/pgvector:pg16`, migrated) +
+running API dev server (registered a tenant, hit `/chat`'s 503 gate for
+real over HTTP with no `GROQ_API_KEY` configured) — the React UI itself
+wasn't visually verified in a browser, since no browser-automation tool was
+available this session, same caveat as Phase 3's status note._
+
+| #   | Ticket                                                                                                                                                                                   | Model                 |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| 3.5 | Embeddings: pgvector + sentence-transformers (CPU, free) worker embedding every transcript segment on finalize                                                                           | Sonnet                |
+| 3.6 | "Ask your meetings" RAG chat: retrieval (pgvector) + Groq LLM answer with citations linking to meeting + timestamp; SSE-streamed                                                         | **Opus** (ran Sonnet) |
+| 3.7 | Follow-up agent: after each meeting, draft a follow-up email (summary + action items per owner) shown in dashboard for one-click approve/edit/send — human-in-the-loop, never auto-sends | Sonnet                |
+| 3.8 | Nudge agent: daily cron scans open action items past due, notifies owners (dashboard + optional email digest)                                                                            | Sonnet                |
 
 ### Phase 4 (stretch) — Team analytics dashboard (D42)
 
@@ -234,6 +300,13 @@ reserve (5.6) — zero scheduled implementation (D41). See
 diarization + speaker merge implemented, chaos-tested, and reviewed; three
 bugs found in the 2.8 review were fixed in the same session (D58) rather
 than carried into Phase 3.
+
+**Phase 3 status:** 3.1–3.4 all done (2026-07-19). Extraction worker
+(action items/decisions/summary + batched sentiment, one job/queue per
+D59–D61), the tenant-wide + per-meeting action-items UI, and the
+approval-gated Resend summary email are all live; see the phase's own
+status note above for verification detail and the all-Sonnet model
+deviation.
 
 Every architectural and product decision behind these tickets is logged with
 reasoning and rejected alternatives in [decisions.md](decisions.md) — cite entries

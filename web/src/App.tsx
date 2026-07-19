@@ -3,6 +3,8 @@ import { getToken, setToken } from "./api.js";
 import { AuthPage } from "./pages/AuthPage.js";
 import { MeetingsPage } from "./pages/MeetingsPage.js";
 import { MeetingDetailPage } from "./pages/MeetingDetailPage.js";
+import { ActionItemsPage } from "./pages/ActionItemsPage.js";
+import { ChatPage } from "./pages/ChatPage.js";
 
 // Hash routing keeps the SPA a single static file with zero dependencies —
 // react-router earns its keep when the dashboard grows past two routes
@@ -35,7 +37,11 @@ export function App() {
     );
   }
 
-  const meetingMatch = route.match(/^#\/meetings\/([0-9a-f-]{36})$/);
+  const meetingMatch = route.match(
+    /^#\/meetings\/([0-9a-f-]{36})(?:\?segment=([0-9a-f-]{36}))?$/,
+  );
+  const isActionItems = route === "#/action-items";
+  const isChat = route === "#/chat";
 
   return (
     <main
@@ -59,17 +65,33 @@ export function App() {
         <a href="#/" style={{ textDecoration: "none", color: "inherit" }}>
           <strong>ScribeFlow</strong>
         </a>
-        <button
-          style={{ background: "none", border: "none", color: "#6b7280" }}
-          onClick={() => {
-            setToken(null);
-            setAuthed(false);
-          }}
-        >
-          Log out
-        </button>
+        <nav style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <a href="#/chat" style={{ color: "inherit" }}>
+            Ask your meetings
+          </a>
+          <a href="#/action-items" style={{ color: "inherit" }}>
+            Action items
+          </a>
+          <button
+            style={{ background: "none", border: "none", color: "#6b7280" }}
+            onClick={() => {
+              setToken(null);
+              setAuthed(false);
+            }}
+          >
+            Log out
+          </button>
+        </nav>
       </header>
-      {meetingMatch ? <MeetingDetailPage id={meetingMatch[1]!} /> : <MeetingsPage />}
+      {meetingMatch ? (
+        <MeetingDetailPage id={meetingMatch[1]!} initialSegmentId={meetingMatch[2]} />
+      ) : isActionItems ? (
+        <ActionItemsPage />
+      ) : isChat ? (
+        <ChatPage />
+      ) : (
+        <MeetingsPage />
+      )}
     </main>
   );
 }

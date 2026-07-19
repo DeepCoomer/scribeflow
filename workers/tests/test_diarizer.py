@@ -15,7 +15,7 @@ from scribeflow_workers.config import Settings
 from scribeflow_workers.db import FanIn
 from scribeflow_workers.diarize_backends import SpeakerTurn
 from scribeflow_workers.framework import PermanentError
-from scribeflow_workers.messages import MeetingStitchV1, StatusEventV1
+from scribeflow_workers.messages import MeetingStitchV1, PipelineEventV1
 from scribeflow_workers.topology import MEETING_STITCH
 
 TENANT = "11111111-1111-4111-8111-111111111111"
@@ -36,10 +36,10 @@ def payload(**overrides: Any) -> dict[str, Any]:
 
 class FakeCtx:
     def __init__(self) -> None:
-        self.events: list[StatusEventV1] = []
+        self.events: list[PipelineEventV1] = []
         self.published: list[tuple[str, Any]] = []
 
-    def publish_event(self, event: StatusEventV1) -> None:
+    def publish_event(self, event: PipelineEventV1) -> None:
         self.events.append(event)
 
     def publish(self, routing_key: str, message: Any) -> None:

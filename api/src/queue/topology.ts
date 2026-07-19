@@ -23,6 +23,8 @@ export const ROUTING_KEYS = {
   chunkTranscribe: "chunk.transcribe",
   meetingDiarize: "meeting.diarize",
   meetingStitch: "meeting.stitch",
+  meetingExtract: "meeting.extract",
+  meetingEmbed: "meeting.embed",
 } as const;
 
 export const RETRY_TIERS = [
@@ -67,11 +69,30 @@ export const STITCHER_QUEUE: QueueSpec = {
   bindings: [ROUTING_KEYS.meetingStitch],
 };
 
+// Phase 3 (3.1/3.2, D59): the intelligence pass — action items, decisions,
+// summary, and batched per-utterance sentiment — all run as one job per
+// meeting, published by the stitcher once the transcript is final.
+export const EXTRACTOR_QUEUE: QueueSpec = {
+  name: "q.extractor",
+  bindings: [ROUTING_KEYS.meetingExtract],
+};
+
+// Ticket 3.5 (D63): embeds every transcript segment, one job per meeting,
+// published by the stitcher alongside meeting.extract — runs in parallel
+// with extraction, not folded into the same job, so a slow/failed embed
+// never blocks or retries the intelligence pass.
+export const EMBEDDER_QUEUE: QueueSpec = {
+  name: "q.embedder",
+  bindings: [ROUTING_KEYS.meetingEmbed],
+};
+
 export const WORK_QUEUES: readonly QueueSpec[] = [
   SLICER_QUEUE,
   TRANSCRIBER_QUEUE,
   DIARIZER_QUEUE,
   STITCHER_QUEUE,
+  EXTRACTOR_QUEUE,
+  EMBEDDER_QUEUE,
 ];
 
 export function retryQueueName(queue: string, tierSuffix: string): string {

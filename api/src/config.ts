@@ -30,6 +30,25 @@ const envSchema = z.object({
   // Comma-separated allowed browser origins (the Vite dev server locally,
   // the Vercel dashboard in production).
   CORS_ORIGINS: z.string().default("http://localhost:5173"),
+  // Ticket 3.4: optional (D22-style fallback — "or skip" per plan.md). Unset
+  // means the summary-email endpoint 503s, same pattern as R2 above.
+  RESEND_API_KEY: z.string().optional(),
+  RESEND_FROM_EMAIL: z
+    .string()
+    .default("ScribeFlow <notifications@scribeflow.deepcoomer.dev>"),
+  // Ticket 3.6 (D64): the RAG chat's answer step (retrieval itself needs no
+  // API key — pgvector + the in-process transformers.js query embedder).
+  // Same account/key as the workers' extraction pass, but its own env var
+  // here since the API and the Python workers don't share a process — unset
+  // means the chat endpoint 503s, same "optional, or skip" pattern as
+  // RESEND_API_KEY/R2 above.
+  GROQ_API_KEY: z.string().optional(),
+  GROQ_LLM_MODEL: z.string().default("llama-3.3-70b-versatile"),
+  // Ticket 3.6 (D64): must stay the transformers.js/ONNX twin of the
+  // workers' EMBEDDING_MODEL (workers/.env.example) — same weights,
+  // different runtime — or query vectors land in a different space than
+  // the stored document vectors.
+  EMBEDDING_QUERY_MODEL: z.string().default("Xenova/all-MiniLM-L6-v2"),
 });
 
 export type Env = z.infer<typeof envSchema>;

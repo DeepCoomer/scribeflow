@@ -11,9 +11,10 @@ from scribeflow_workers import db as db_module
 from scribeflow_workers import stitcher
 from scribeflow_workers.chunking import compute_chunk_plan
 from scribeflow_workers.config import Settings
-from scribeflow_workers.db import StitchInfo, StitchSegmentRow
+from scribeflow_workers.db import FanIn, StitchInfo, StitchSegmentRow
 from scribeflow_workers.framework import PermanentError
-from scribeflow_workers.messages import StatusEventV1
+from scribeflow_workers.messages import MeetingEmbedV1, MeetingExtractV1, PipelineEventV1
+from scribeflow_workers.topology import MEETING_EMBED, MEETING_EXTRACT
 
 TENANT = "11111111-1111-4111-8111-111111111111"
 MEETING = "22222222-2222-4222-8222-222222222222"
@@ -113,13 +114,14 @@ def payload(**overrides: Any) -> dict[str, Any]:
 
 class FakeCtx:
     def __init__(self) -> None:
-        self.events: list[StatusEventV1] = []
+        self.events: list[PipelineEventV1] = []
+        self.published: list[tuple[str, Any]] = []
 
-    def publish_event(self, event: StatusEventV1) -> None:
+    def publish_event(self, event: PipelineEventV1) -> None:
         self.events.append(event)
 
     def publish(self, routing_key: str, message: Any) -> None:
-        raise AssertionError("the stitcher never publishes downstream jobs")
+        self.published.append((routing_key, message))
 
 
 class DbCalls:
@@ -134,6 +136,15 @@ class DbCalls:
         self.finalizations: list[db_module.StitchFinalization] = []
         self.completed: list[str] = []
         self.failed: list[tuple[str, str]] = []
+        # 3.1/3.2 (D59): the post-claim-skip redelivery re-check reads fan-in
+        # status and whether the extract/embed jobs have ever been recorded.
+        # One fake result for both (3.5, D63): the real job_exists is keyed
+        # by job_key, but no test here needs the extract and embed checks to
+        # disagree with each other.
+        self.fan_in_result = FanIn(
+            chunks_done=2, total_chunks=2, diarization_done=True, status="done"
+        )
+        self.job_exists_result = False
 
 
 @pytest.fixture()
@@ -164,6 +175,10 @@ def db_calls(monkeypatch: pytest.MonkeyPatch) -> DbCalls:
     )
     monkeypatch.setattr(
         db_module, "fail_job", lambda conn, key, error: calls.failed.append((key, error))
+    )
+    monkeypatch.setattr(db_module, "get_fan_in", lambda conn, m: calls.fan_in_result)
+    monkeypatch.setattr(
+        db_module, "job_exists", lambda conn, key: calls.job_exists_result
     )
     return calls
 
@@ -201,6 +216,17 @@ def test_all_chunks_done_no_gaps_finalizes_done(db_calls: DbCalls) -> None:
     assert finalization.speaker_defaults == {}
     assert ctx.events[0].status == "done"
     assert db_calls.completed == [f"{MEETING}:stitch:0"]
+    # 3.1/3.2 (D59) + 3.5 (D63): a done transcript kicks off both the
+    # intelligence pass and embedding, as two independent fan-outs.
+    (extract_call, embed_call) = ctx.published
+    assert extract_call == (
+        MEETING_EXTRACT,
+        MeetingExtractV1(tenant_id=TENANT, meeting_id=MEETING),
+    )
+    assert embed_call == (
+        MEETING_EMBED,
+        MeetingEmbedV1(tenant_id=TENANT, meeting_id=MEETING),
+    )
 
 
 def test_speaker_merge_assigns_max_overlap_label_to_surviving_segments(
@@ -255,6 +281,9 @@ def test_exhausted_middle_chunk_finalizes_partial_with_a_gap(db_calls: DbCalls) 
     assert finalization.gaps == [(300.0, 580.0)]
     assert finalization.drop_segment_ids == []  # no dedup across the missing chunk
     assert ctx.events[0].status == "partial"
+    # partial still has real transcript content worth extracting from/embedding.
+    routing_keys = [key for key, _message in ctx.published]
+    assert routing_keys == [MEETING_EXTRACT, MEETING_EMBED]
 
 
 def test_every_chunk_exhausted_finalizes_failed(db_calls: DbCalls) -> None:
@@ -265,6 +294,8 @@ def test_every_chunk_exhausted_finalizes_failed(db_calls: DbCalls) -> None:
 
     (finalization,) = db_calls.finalizations
     assert finalization.status == "failed"
+    # Nothing to extract from a meeting with zero surviving chunks.
+    assert ctx.published == []
 
 
 def test_diarization_error_forces_partial_even_with_no_gaps(db_calls: DbCalls) -> None:
@@ -280,10 +311,57 @@ def test_diarization_error_forces_partial_even_with_no_gaps(db_calls: DbCalls) -
     assert finalization.error == "pyannote OOM"
 
 
-def test_redelivered_done_job_is_skipped(db_calls: DbCalls) -> None:
+def test_redelivered_done_job_republishes_extract_and_embed_when_missing(
+    db_calls: DbCalls,
+) -> None:
+    # Crash window (D59, mirrors D50; D63 mirrors it again for embed): the
+    # extract/embed jobs were never recorded, so the redelivered stitch
+    # fills the gap instead of leaving the meeting stitched-but-never-
+    # processed forever.
     db_calls.claim_result = False
-    stitcher.handle_meeting_stitch(payload(), FakeCtx(), make_deps())
+    db_calls.fan_in_result = FanIn(
+        chunks_done=2, total_chunks=2, diarization_done=True, status="done"
+    )
+    db_calls.job_exists_result = False
+    ctx = FakeCtx()
+    stitcher.handle_meeting_stitch(payload(), ctx, make_deps())
+
     assert db_calls.finalizations == []
+    (extract_call, embed_call) = ctx.published
+    assert extract_call == (
+        MEETING_EXTRACT,
+        MeetingExtractV1(tenant_id=TENANT, meeting_id=MEETING),
+    )
+    assert embed_call == (
+        MEETING_EMBED,
+        MeetingEmbedV1(tenant_id=TENANT, meeting_id=MEETING),
+    )
+
+
+def test_redelivered_done_job_skips_republish_once_extraction_started(
+    db_calls: DbCalls,
+) -> None:
+    db_calls.claim_result = False
+    db_calls.fan_in_result = FanIn(
+        chunks_done=2, total_chunks=2, diarization_done=True, status="done"
+    )
+    db_calls.job_exists_result = True
+    ctx = FakeCtx()
+    stitcher.handle_meeting_stitch(payload(), ctx, make_deps())
+    assert ctx.published == []
+
+
+def test_redelivered_done_job_never_republishes_extract_for_a_failed_meeting(
+    db_calls: DbCalls,
+) -> None:
+    db_calls.claim_result = False
+    db_calls.fan_in_result = FanIn(
+        chunks_done=2, total_chunks=2, diarization_done=True, status="failed"
+    )
+    db_calls.job_exists_result = False
+    ctx = FakeCtx()
+    stitcher.handle_meeting_stitch(payload(), ctx, make_deps())
+    assert ctx.published == []
 
 
 def test_invalid_message_is_permanent(db_calls: DbCalls) -> None:
@@ -318,7 +396,7 @@ def test_any_failure_rolls_back_the_shared_connection(
 
 def test_exhausted_hook_marks_meeting_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     deps = make_deps()
-    events: list[StatusEventV1] = []
+    events: list[PipelineEventV1] = []
     statuses: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
         db_module,
@@ -329,7 +407,7 @@ def test_exhausted_hook_marks_meeting_failed(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     class Ctx:
-        def publish_event(self, event: StatusEventV1) -> None:
+        def publish_event(self, event: PipelineEventV1) -> None:
             events.append(event)
 
     on_exhausted = stitcher.make_on_exhausted(deps)

@@ -41,9 +41,23 @@ class MeetingStitchV1(BaseModel):
     meeting_id: str
 
 
+class MeetingExtractV1(BaseModel):
+    v: Literal[1] = 1
+    tenant_id: str
+    meeting_id: str
+
+
+class MeetingEmbedV1(BaseModel):
+    v: Literal[1] = 1
+    tenant_id: str
+    meeting_id: str
+
+
 MeetingStatus = Literal[
     "pending", "uploading", "processing", "transcribing", "partial", "done", "failed"
 ]
+
+ExtractionStatus = Literal["done", "failed"]
 
 
 def _now_iso() -> str:
@@ -61,3 +75,23 @@ class StatusEventV1(BaseModel):
     status: MeetingStatus
     error: str | None = None
     ts: str = Field(default_factory=_now_iso)
+
+
+class ExtractionEventV1(BaseModel):
+    """Published by the extractor (3.1/3.2, D59) once its job reaches a
+    terminal state — separate from StatusEventV1 because extraction never
+    changes `meetings.status` (a stitched transcript is already `done`/
+    `partial` regardless of whether the intelligence pass has run yet)."""
+
+    v: Literal[1] = 1
+    type: Literal["meeting.extraction"] = "meeting.extraction"
+    tenant_id: str
+    meeting_id: str
+    status: ExtractionStatus
+    error: str | None = None
+    ts: str = Field(default_factory=_now_iso)
+
+
+# Anything a worker can publish to the `events` fanout (framework.py's
+# JobContext.publish_event is generic over this).
+PipelineEventV1 = StatusEventV1 | ExtractionEventV1

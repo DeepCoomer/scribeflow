@@ -18,11 +18,19 @@ from . import db
 from .chunking import CHUNK_S, ChunkSpec, chunk_end_s, compute_chunk_plan, cut_point
 from .config import Settings, get_settings
 from .db import StitchSegmentRow
+from .embedder import job_key as embed_job_key
+from .extractor import job_key as extract_job_key
 from .framework import JobContext, PermanentError, Worker
 from .logging import configure_logging, get_logger
 from .merge import SpeakerTurn, merge_speakers
-from .messages import MeetingStatus, MeetingStitchV1, StatusEventV1
-from .topology import STITCHER_QUEUE
+from .messages import (
+    MeetingEmbedV1,
+    MeetingExtractV1,
+    MeetingStatus,
+    MeetingStitchV1,
+    StatusEventV1,
+)
+from .topology import MEETING_EMBED, MEETING_EXTRACT, STITCHER_QUEUE
 
 log = get_logger("stitcher")
 
@@ -138,6 +146,29 @@ def handle_meeting_stitch(payload: dict[str, Any], ctx: JobContext, deps: Deps) 
 def _run(msg: MeetingStitchV1, ctx: JobContext, deps: Deps, key: str) -> None:
     if not db.claim_job(deps.conn, msg.tenant_id, msg.meeting_id, key, STAGE):
         log.info("job.skipped_already_done", job_key=key)
+        # Same crash window D50 named for chunk completion -> meeting.stitch:
+        # a crash between this job's commit and publishing meeting.extract
+        # would otherwise strand the meeting stitched-but-never-extracted
+        # forever. Only fill that gap once — checking job_exists (not just
+        # re-publishing unconditionally) keeps a duplicate stitch delivery
+        # arriving long after extraction already ran from re-triggering it
+        # every time, mirroring the transcriber's "only if still
+        # transcribing" guard on its analogous re-check.
+        existing_status = db.get_fan_in(deps.conn, msg.meeting_id).status
+        if existing_status != "failed":
+            if not db.job_exists(deps.conn, extract_job_key(msg.meeting_id)):
+                ctx.publish(
+                    MEETING_EXTRACT,
+                    MeetingExtractV1(tenant_id=msg.tenant_id, meeting_id=msg.meeting_id),
+                )
+            # Same crash-window fill as extraction above, mirrored for the
+            # embedder (3.5) since it's an independent fan-out from this
+            # same stitch, not a step inside the extract job.
+            if not db.job_exists(deps.conn, embed_job_key(msg.meeting_id)):
+                ctx.publish(
+                    MEETING_EMBED,
+                    MeetingEmbedV1(tenant_id=msg.tenant_id, meeting_id=msg.meeting_id),
+                )
         return
 
     try:
@@ -198,6 +229,20 @@ def _run(msg: MeetingStitchV1, ctx: JobContext, deps: Deps, key: str) -> None:
             )
         )
         db.complete_job(deps.conn, key)
+        # 3.1/3.2 (D59): kick off the intelligence pass on anything with a
+        # transcript worth reading — `partial` still has real content, only
+        # `failed` (zero surviving chunks) has nothing to extract from.
+        if status != "failed":
+            ctx.publish(
+                MEETING_EXTRACT,
+                MeetingExtractV1(tenant_id=msg.tenant_id, meeting_id=msg.meeting_id),
+            )
+            # 3.5 (D63): embedding runs as its own parallel fan-out, not a
+            # step inside meeting.extract — same trigger condition.
+            ctx.publish(
+                MEETING_EMBED,
+                MeetingEmbedV1(tenant_id=msg.tenant_id, meeting_id=msg.meeting_id),
+            )
         log.info(
             "meeting.stitched",
             meeting_id=msg.meeting_id,

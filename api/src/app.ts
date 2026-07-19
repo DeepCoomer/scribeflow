@@ -10,11 +10,15 @@ import tenantPlugin from "./plugins/tenant.js";
 import queuePlugin from "./plugins/queue.js";
 import eventsPlugin from "./plugins/events.js";
 import { createR2 } from "./lib/r2.js";
+import { createEmailSender } from "./lib/email.js";
+import { createEmbedder } from "./lib/embeddings.js";
+import { createChatBackend } from "./lib/chat.js";
 import { parseCorsOrigins } from "./lib/cors.js";
 import healthRoutes from "./routes/health.js";
 import authRoutes from "./routes/auth.js";
 import meRoutes from "./routes/me.js";
 import meetingRoutes from "./routes/meetings.js";
+import chatRoutes from "./routes/chat.js";
 
 // pino's transport option is only valid when present at all — passing
 // `transport: undefined` trips exactOptionalPropertyTypes, so it's built
@@ -44,6 +48,15 @@ export async function buildApp(env: Env) {
   app.decorate("r2", createR2(env));
   if (!app.r2) {
     app.log.warn("R2 credentials not set — upload endpoints disabled (503)");
+  }
+  app.decorate("email", createEmailSender(env));
+  if (!app.email) {
+    app.log.warn("RESEND_API_KEY not set — summary-email endpoint disabled (503)");
+  }
+  app.decorate("embedder", createEmbedder(env));
+  app.decorate("chat", createChatBackend(env));
+  if (!app.chat) {
+    app.log.warn("GROQ_API_KEY not set — /chat endpoint disabled (503)");
   }
 
   if (env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET) {
@@ -78,6 +91,7 @@ export async function buildApp(env: Env) {
   await app.register(authRoutes);
   await app.register(meRoutes);
   await app.register(meetingRoutes);
+  await app.register(chatRoutes);
 
   return app;
 }

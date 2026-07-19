@@ -34,7 +34,7 @@ from pydantic import BaseModel
 
 from .config import Settings
 from .logging import get_logger
-from .messages import StatusEventV1
+from .messages import PipelineEventV1
 from .topology import (
     EVENTS_EXCHANGE,
     PARKING_QUEUE,
@@ -56,7 +56,7 @@ class PermanentError(Exception):
 
 
 class JobContext(Protocol):
-    def publish_event(self, event: StatusEventV1) -> None: ...
+    def publish_event(self, event: PipelineEventV1) -> None: ...
     def publish(self, routing_key: str, message: BaseModel) -> None:
         """Publish a job onto the pipeline exchange (e.g. a slicer emitting
         chunk.transcribe jobs, or a chunk worker triggering meeting.stitch)."""
@@ -71,7 +71,7 @@ class _Context:
     def __init__(self, worker: "Worker") -> None:
         self._worker = worker
 
-    def publish_event(self, event: StatusEventV1) -> None:
+    def publish_event(self, event: PipelineEventV1) -> None:
         self._worker._publish_event_threadsafe(event)
 
     def publish(self, routing_key: str, message: BaseModel) -> None:
@@ -274,7 +274,7 @@ class Worker:
         channel.basic_ack(delivery_tag)
         self._finish_in_flight()
 
-    def _publish_event(self, event: StatusEventV1) -> None:
+    def _publish_event(self, event: PipelineEventV1) -> None:
         self._require_channel().basic_publish(
             exchange=EVENTS_EXCHANGE,
             routing_key="",
@@ -282,7 +282,7 @@ class Worker:
             properties=BasicProperties(delivery_mode=1, content_type="application/json"),
         )
 
-    def _publish_event_threadsafe(self, event: StatusEventV1) -> None:
+    def _publish_event_threadsafe(self, event: PipelineEventV1) -> None:
         self._threadsafe(functools.partial(self._publish_event, event))
 
     def _publish(self, routing_key: str, message: BaseModel) -> None:

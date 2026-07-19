@@ -30,16 +30,26 @@ Domain renewal for `deepcoomer.dev` is the only pre-existing cost; no new spend.
   | ------------------------------------------------ | -------- |
   | Postgres                                         | 1 GB     |
   | RabbitMQ                                         | 0.75 GB  |
-  | API + Caddy ingress                              | 0.75 GB  |
+  | API + Caddy ingress                              | 1 GB     |
   | Python workers (slice/transcribe/stitch/extract) | 1.5 GB   |
   | pyannote diarizer (peak)                         | 2 GB     |
+  | sentence-transformers embedder (ticket 3.5, D63) | 0.75 GB  |
+  | nudger (ticket 3.8, D66 — no queue, no model)    | 0.125 GB |
   | 2 Meet-bot containers (Chromium + Xvfb × 2)      | 4 GB     |
-  | Headroom / page cache                            | 2 GB     |
+  | Headroom / page cache                            | 0.875 GB |
 
   Dropping ClickHouse (D42) freed 3 GB, which buys the **second concurrent
   bot-recorded meeting**. The orchestrator enforces the cap with a semaphore
   (2, or 1 while diarization is at peak); extra meetings queue. Fine for a
-  demo/small team; scale-out path is "add a host, point it at RabbitMQ."
+  demo/small team; scale-out path is "add a host, point it at RabbitMQ." The
+  embedder (3.5) reuses the diarizer's "CPU torch build, own line item"
+  shape rather than sharing the already-budgeted extractor line — it's a
+  second always-resident model process, not a stateless Groq HTTP call. The
+  RAG chat's query-time embedding (3.6, D64) runs transformers.js/ONNX
+  in-process inside the API instead — much lighter than torch, but still a
+  resident small model, so the API line moved 0.75 GB → 1 GB. Headroom
+  absorbs both costs (2 GB → 1 GB total) rather than the bot-container cap,
+  since the pipeline should stay usable even mid-recording.
 
 ## DNS & subdomains (D39/D40)
 

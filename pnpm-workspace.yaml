@@ -4,3 +4,5 @@ packages:
   - "bot"
 allowBuilds:
   esbuild: true
+  protobufjs: true
+  sharp: true

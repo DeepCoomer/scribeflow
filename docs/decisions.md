@@ -322,6 +322,205 @@ input must survive the merge. _Rejected:_ an `is_interruption` /
 `speaker_turns` post-merge (destroys the re-stitch input and 4.1's source
 data).
 
+## Intelligence layer
+
+**D59 — Extraction worker (3.1): one job per meeting, triggered by the
+stitcher on `done`/`partial` (never `failed`); strict JSON via a
+retry-on-invalid loop inside the handler, not the queue's retry ladder.**
+`meeting.stitch` gains a sibling `meeting.extract` message (job key
+`{meetingId}:extract:0`, own `q.extractor` queue, D24-style shared rate
+limiter under its own `groq_llm` bucket since Groq's free-tier limits are
+per-model). The stitcher publishes it right after `finalize_stitch` commits,
+guarded by `status != "failed"` — a `partial` transcript still has real
+content worth summarizing, a `failed` one (zero surviving chunks) has
+nothing to extract. The same crash-window argument as D50 applies to the
+publish itself: the stitcher's post-claim-skip redelivery path re-checks
+`job_exists(extract_job_key)` and republishes if it's missing, mirroring the
+transcriber's analogous "republish meeting.stitch if fan-in closed but not
+yet stitched" check — checking existence (not republishing unconditionally)
+stops a duplicate stitch delivery arriving long after extraction already ran
+from re-triggering it every time. A malformed/schema-invalid Groq JSON
+response gets re-prompted in-line with the parse error (up to 3 total
+attempts) before the handler raises and falls through to the standard D43
+retry ladder — a prompt nudge is worth trying immediately, but a call that's
+still broken after that is more likely a transient Groq issue than a fixable
+prompt problem. An empty transcript (D48's "empty is a success" precedent)
+skips the LLM entirely and writes a trivial summary. The transcript sent to
+the model is capped at ~60k characters, eliding the middle and keeping
+head+tail (summaries/decisions concentrate at a meeting's start and end far
+more than its middle) — a documented v1 limitation, not full map-reduce
+chunking. `source_ts_s` (the model's approximate mm:ss guess) links an
+action item/decision to its nearest transcript segment only within a 60 s
+tolerance and has no FK (see D60) — advisory, not authoritative. _Rejected:_
+Opus for this ticket despite the model-strategy table calling it out as
+"decided design, hard implementation" — run as Sonnet by explicit user
+request across all of Phase 3, same deviation pattern as 2.6/2.7/2.8 (see
+D41 note in plan.md); a separate merge-worker/queue hop for extraction
+(adds a crash window for no benefit, same reasoning D55 used for the
+speaker merge); failing the whole pipeline's terminal status on extraction
+failure (extraction is an enhancement — a `done`/`partial` transcript is
+already correct and complete without it).
+
+**D60 — `meeting_summaries` is upserted by `meeting_id`; `action_items`
+gains `owner_name` (free text) alongside `owner_user_id` (real assignment);
+`source_segment_id` stays a plain uuid with no FK.**
+Unlike `transcript_segments`/`action_items` (delete-and-reinsert-by-meeting,
+D15), a summary has no natural per-row identity to replace — `meeting_id` is
+already the unique key, so `INSERT ... ON CONFLICT (meeting_id) DO UPDATE`
+is the idempotent shape for a redelivered `meeting.extract` job.
+`action_items.owner_name` is what the LLM read off the transcript (usually a
+speaker name) — never auto-resolved to a `users` row, the same "candidate,
+not assignment" caution D56 applied to calendar attendees; `owner_user_id`
+is set only by a human via the 3.3 UI's explicit assign action.
+`source_segment_id` deliberately has no FK: a re-stitch deletes and
+reinserts `transcript_segments` with fresh ids (D11/D49), so an FK (even
+`ON DELETE SET NULL`) would silently orphan every existing action item's
+transcript link on the next re-stitch. A plain uuid means a stale link just
+404s in the UI instead of corrupting data. _Rejected:_ auto-matching
+`owner_name` to a `users` row by name equality (guaranteed misattribution
+the moment two people share a first name, same reasoning as D56's rejected
+voice-count auto-match).
+
+**D61 — Per-utterance sentiment (3.2) is a second batched call inside the
+same extractor job/queue, not a separate worker or queue.**
+architecture.md's data flow already describes "Intelligence (extractor):
+LLM pass for action items / decisions / summary; sentiment pass per
+utterance" as one step, not two — splitting it into a second queue hop
+would buy nothing (both passes need the same finalized transcript, run
+after the same trigger, and share the same rate-limit bucket) while adding
+another crash window and job-ledger key to reason about. Segments are sent
+to Groq in batches of 40 with a JSON array of `{segment_id, text}` and
+scored `{segment_id, label, score}`; a batch's own retry-on-invalid loop
+(same as D59) applies independently, and the per-segment `UPDATE` is
+idempotent (unlike `action_items`/`meeting_summaries`, there's nothing to
+replace-or-upsert — writing the same label/score twice is a no-op).
+`transcript_segments` gains `sentiment_label`/`sentiment_score` columns,
+null until this pass runs — Phase 4.1's `utterance_metrics` aggregation
+reads them once that ticket lands. _Rejected:_ a dedicated `meeting.sentiment`
+message/queue (extra crash window, no independent trigger condition to
+justify it).
+
+**D62 — Summary email (3.4) is approval-gated and sent only to the
+requesting user, via Resend or a 503 if unconfigured.**
+CLAUDE.md's project description states the summary/action items are
+"delivered via dashboard + approval-gated email" — so `POST
+/meetings/:id/summary-email` only ever fires from an explicit user click,
+never automatically when extraction finishes (mirrors the 3.7 follow-up
+agent's human-in-the-loop rule, invariant 7, applied one ticket early since
+this is the same kind of send). Resend's HTTP API is a single POST, so
+`lib/email.ts` calls `fetch` directly instead of adding the `resend` SDK
+dependency — same "only what's needed" reasoning D26 applied to R2 (no S3
+SDK abstraction beyond `@aws-sdk/client-s3` itself). Recipient is the
+caller's own email, not a fan-out to attendees: there is no attendee
+roster to send to before the Phase 6 calendar integration lands, and
+guessing recipients from transcript speaker names would be exactly the kind
+of misattribution D56 already rejected for renaming. Unset
+`RESEND_API_KEY` disables the route (503), the same pattern R2 uses for the
+upload endpoints — matches plan.md's "optional... or skip" framing for this
+ticket. _Rejected:_ auto-send on extraction complete (violates the
+approval-gate), emailing every tenant user (no roster to scope it to yet).
+
+## Agent layer
+
+**D63 — Embeddings (3.5) run as their own worker/queue in parallel with
+extraction, writing directly to a `transcript_segments.embedding vector(384)`
+column.**
+Mirrors invariant 5's "diarization and transcription run in parallel and
+merge independently" shape rather than folding embedding into the 3.1/3.2
+extractor job: a slow or failed embed pass should never block or retry the
+summary/action-items pass, and vice versa, so `meeting.embed` is a sibling
+fan-out the stitcher publishes alongside `meeting.extract` (same trigger
+condition — anything that isn't `failed`), not a third step inside it. The
+vector lives as a column on `transcript_segments` itself (not a separate
+`segment_embeddings` table) since it's a 1:1 per-segment enrichment, same
+shape as 3.2's `sentiment_label`/`sentiment_score` columns — best-effort,
+not part of the pipeline's terminal-status contract, null until the pass
+runs. The model is `sentence-transformers/all-MiniLM-L6-v2` (D19's already-
+decided choice), a CPU torch build behind its own `embed` extra (same
+pattern as the diarizer's `diarize` extra) — the RAM line this adds
+(0.75 GB) comes out of headroom, not the bot-container budget, so the
+pipeline stays usable mid-recording. pgvector's HNSW index needs an
+operator class (`vector_cosine_ops`) drizzle-kit's index builder can't
+express, so it's hand-added in the migration SQL instead of declared in
+schema.ts. Requires swapping the Postgres image from `postgres:16-alpine` to
+`pgvector/pgvector:pg16` (same Postgres, extension pre-installed — nothing
+else differs). _Rejected:_ embedding inside the 3.1/3.2 extractor job (couples
+two independently-failable concerns), a separate `segment_embeddings` table
+(no benefit over a column for a strict 1:1 relationship).
+
+**D64 — The RAG chat's query-time embedding runs transformers.js/ONNX
+in-process inside the Node API, not a second Python service or an RPC call
+into the workers.**
+The chat answer needs the user's query embedded into the _same_ vector space
+3.5's documents live in, but the API and the Python workers are different
+processes/languages with no existing sync call path between them (the queue
+is fire-and-forget, wrong shape for a request/response chat turn). Standing
+up a second HTTP service just to embed one string, or shelling out to
+Python, both add an operational moving part for a single vector computation.
+transformers.js ships `Xenova/all-MiniLM-L6-v2` — an ONNX export of the exact
+weights `sentence-transformers/all-MiniLM-L6-v2` uses — so calling `pipeline
+("feature-extraction", ...)` in Node lands in the same 384-dim cosine space
+as the stored embeddings, no cross-language RPC needed. Retrieval itself is
+raw SQL (`db.execute(sql\`...\`)`), not the query builder: pgvector's `<=>`cosine-distance operator and the`::vector`cast on a query embedding aren't
+expressible through drizzle-orm's builder, same reasoning D63 gives for the
+HNSW index. The endpoint is`POST /chat`with an SSE response, not an
+EventSource`GET`the way the 1.6 status stream is (D44): a free-text query
+doesn't fit safely/losslessly in a URL, and consuming`text/event-stream`only requires a`fetch()` `ReadableStream`reader, not the EventSource API
+specifically. Citations ride as a separate structured SSE event (index,
+meeting id, segment id, timestamp) rather than being parsed out of the LLM's
+prose — the system prompt asks it to cite`[1]`/`[2]` inline, but the
+frontend's clickable citation links come from the retrieval data ScribeFlow
+already trusts, not from parsing free-form text. _Rejected:_ a Python
+microservice or queue round-trip just for query embedding (new moving part
+for one vector), OpenAI embeddings for the query side only (would still
+need to match the document side's space, and violates $0 regardless).
+
+**D65 — The follow-up email's default draft (3.7) is composed by a template
+grouped by owner, not a second LLM call; only the actually-sent body is
+persisted (`meeting_followups`, upserted by meeting).**
+3.1 already extracted the summary and action items (with `owner_name`) —
+everything the follow-up needs — so a second Groq call to re-derive the same
+facts in prettier prose would spend rate-limit budget on a draft the human
+edits before sending anyway (CLAUDE.md invariant 7: drafts, never
+auto-sends). Grouping by owner is what actually differentiates this from
+3.4's flat summary email — 3.4 answers "what happened," 3.7 answers "what's
+on my plate" per person. `GET .../followup` returns the last-sent body if
+one exists (so re-editing starts from what actually went out, not a wiped
+slate or a silently-changed recompute) and only falls back to a fresh
+default when nothing has ever been sent — same reasoning as 3.4/3.1's
+"upsert by meeting_id, no per-row history" shape (`meeting_summaries`,
+D60), since nobody reads a history of drafts, only the current one.
+_Rejected:_ a second Groq call for the draft (spends quota re-deriving data
+already extracted, for text a human overwrites anyway), storing every draft
+revision (no reader for that history).
+
+**D66 — The nudger (3.8) is a standalone sleep-loop script, not a queue
+worker; it throttles to one email per owner per day via
+`action_items.last_nudged_at`; the dashboard's overdue flag is independent
+of whether any email ever sends.**
+Every other worker in `framework.py` is message-driven (`Worker` consumes an
+AMQP queue); the nudger's trigger is "a day has passed," which has no queue
+message to bind to — wrapping a cron-shaped job in the AMQP consumer
+machinery would be a worse fit than a plain `while True: run_once();
+sleep(24h)` loop, so it gets neither a queue binding nor a `framework.Worker`
+instance. `last_nudged_at` (compared against "start of today," not merely
+"is it null") keeps a still-open, still-overdue item eligible for exactly
+one digest per day rather than a single lifetime nudge or unlimited
+re-sends — and it only advances for owners whose send actually succeeded, so
+one bad email address doesn't silently suppress next-day retries for that
+owner while every other owner's digest still goes out. Only items with a
+real `owner_user_id` qualify (never an LLM-only `owner_name`) — same
+"candidate, not assignment" caution D56/D59 already established, since
+there's nobody real to email otherwise. The dashboard side of "notifies
+owners" (plan.md) needs no nudger-written state at all: the action-items
+page already has each item's due date, so flagging it overdue is a pure
+client-side computation independent of whether Resend is configured or the
+nudger has ever run — same "optional, or skip" gating as R2/email elsewhere,
+but here the fallback isn't a 503, it's simply "the dashboard still works."
+_Rejected:_ a `meeting.nudge` queue message (no producer/trigger event to
+publish it from), nudging on every run regardless of `last_nudged_at`
+(spams an owner once per deploy/restart instead of once per day).
+
 ## Data layer
 
 **D17 — Two databases: Postgres for state, ClickHouse for analytics.**
