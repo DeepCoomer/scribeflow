@@ -89,12 +89,22 @@ D44, interim `meeting.uploaded` → `q.transcriber` binding D45; the D22
 
 ### Phase 2 — The racing engine + diarization (the hard core)
 
-_Status: 2.1 **done** (2026-07-18) — the racing-engine edge cases are now fully
+_Status: 2.1 **done** (2026-07-18) — the racing-engine edge cases are fully
 specified in architecture.md ("Slicing" through "Fan-in mechanics") with
 decisions D46–D50 (chunk-count formula, always-FLAC re-encode + chunk objects
 in R2, hallucination filter, `exhausted` job state + `transcript_gaps`,
-exactly-once fan-in + crash-window closures). Next: 2.2 (slicer, Opus), one
-ticket per session._
+exactly-once fan-in + crash-window closures). **2.2–2.5 done** (2026-07-19) —
+slicer, chunk transcriber, stitcher, and diarizer all implemented, tested
+(fixtures/fakes only — no live Groq or pyannote calls), and lint/typecheck/
+pytest all green; decisions D51–D54 cover what came up during implementation
+(generic job-publish primitive, pyannote as an optional dependency, the
+live-topology-rebind unbind requirement, and the present-neighbor refinement
+to the stitch dedup rule). Deviation from the model-strategy table: 2.2–2.5
+were run as **Sonnet** in one combined session by explicit user request,
+not Opus/one-ticket-per-session as originally planned — noted here rather
+than changing the table, since Opus stays the default for this shape of
+ticket going forward. Next: 2.6 (speaker merge, Fable design → Opus impl),
+2.7 (chaos tests, Opus), 2.8 (pipeline code review, Opus, D41)._
 
 | #   | Ticket                                                                                                                                                              | Model                            |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |

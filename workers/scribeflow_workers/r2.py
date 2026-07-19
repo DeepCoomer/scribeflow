@@ -33,3 +33,11 @@ def download(client: Any, bucket: str, r2_key: str, dest_dir: Path) -> Path:
     dest = dest_dir / Path(r2_key).name
     client.download_file(bucket, r2_key, str(dest))
     return dest
+
+
+def upload(client: Any, bucket: str, r2_key: str, local_path: Path) -> None:
+    client.upload_file(str(local_path), bucket, r2_key)
+
+
+def chunk_key(tenant_id: str, meeting_id: str, chunk_idx: int) -> str:
+    return f"tenant/{tenant_id}/meeting/{meeting_id}/chunks/{chunk_idx}.flac"

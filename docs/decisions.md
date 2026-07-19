@@ -180,6 +180,60 @@ speakerless and forces `partial`. _Rejected:_ a periodic sweeper that finds
 wedged meetings (a second code path doing the same decision on a timer — the
 redelivery we already get for free is the sweep).
 
+**D51 — `JobContext` gains a generic `publish(routing_key, message)` for the
+pipeline exchange, alongside the existing `publish_event`.**
+Tickets 2.2–2.5 all need to emit downstream jobs (chunk.transcribe,
+meeting.diarize, meeting.stitch), not just status events — one framework
+primitive (persistent delivery, `delivery_mode=2`) serves all of them instead
+of each worker hand-rolling its own `basic_publish` call. `publish_event`
+stays separate and non-persistent, since SSE forwarding was already correctly
+scoped as ephemeral. _Rejected:_ a bespoke publish helper per worker
+(duplicates broker mechanics the framework already owns for events).
+
+**D52 — pyannote.audio/torch ship as an optional `diarize` uv
+dependency-group, not a base dependency; `PyannoteBackend` imports it lazily.**
+Torch is a multi-GB transitive install; making it required would slow down
+`uv sync` and CI for every worker, not just the diarizer, and this project
+already treats "no live heavy-model calls in CI" as the norm (mirrors
+`GroqBackend`'s lazy `groq` import). The diarizer's runtime image installs
+the extra explicitly at build time (`workers/Dockerfile`); default `uv sync`
+never touches it. _Rejected:_ a required dependency (bloats every dev/CI
+environment for code most sessions never run) and a second Dockerfile (more
+to maintain for what's really one `--extra` flag).
+
+**D53 — Live topology rebinds must explicitly unbind the old routing key,
+not just stop asserting it.**
+RabbitMQ never drops a binding just because the code stopped declaring it —
+a broker that already ran Phase 1 (this one had) keeps `q.transcriber`
+bound to `meeting.uploaded` forever unless something explicitly unbinds it,
+so after the D45 rebind that broker would deliver every upload to both
+`q.slicer` and `q.transcriber`, and the chunk transcriber would receive and
+park malformed messages it was never meant to see. Both topology mirrors
+(`topology.py`'s `declare_topology`, `queue.ts`'s `assertTopology`) now issue
+an explicit unbind of `q.transcriber`'s old `meeting.uploaded` binding on
+every boot — a no-op once a broker no longer has it, so it's safe to leave
+in permanently rather than removing it after one deploy. _Rejected:_ a
+manual `rabbitmqctl` runbook step (easy to forget, and defeats the point of
+"topology is code, both sides assert it on connect").
+
+**D54 — Stitch side-assignment and cross-cut dedup only trim at a cut point
+when both neighboring chunks are present; "present" means the chunk's
+transcribe job status is `done`, not "has segment rows."**
+The cut-point rule in D11/D49 was originally specified purely from
+chunk_idx arithmetic, with no account for a missing neighbor. Applied
+blindly next to an exhausted chunk, it silently discards a few good seconds
+of the surviving neighbor's transcript for no reason — there's nothing on
+the failed side to deduplicate against. Defining "present" as job status
+`done` (rather than presence of rows) matters because a chunk that
+succeeded but yielded zero segments after the D48 hallucination filter must
+still count as present, so its neighbors keep trimming normally; only a
+genuinely `exhausted` chunk disables trimming on that side. Gap computation
+(D49) is unaffected — it already worked off this same per-chunk success set
+independently of segment-level dedup. _Rejected:_ always trimming regardless
+of neighbor status (loses good data next to any failure) and treating
+"zero rows" as "chunk failed" (would gap-mark genuinely silent-but-successful
+audio, contradicting D48).
+
 ## Data layer
 
 **D17 — Two databases: Postgres for state, ClickHouse for analytics.**

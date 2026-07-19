@@ -18,6 +18,29 @@ class MeetingUploadedV1(BaseModel):
     duration_hint_s: float | None = None
 
 
+class ChunkTranscribeV1(BaseModel):
+    v: Literal[1] = 1
+    tenant_id: str
+    meeting_id: str
+    chunk_idx: int
+    total_chunks: int
+    offset_s: float
+    r2_key: str
+
+
+class MeetingDiarizeV1(BaseModel):
+    v: Literal[1] = 1
+    tenant_id: str
+    meeting_id: str
+    r2_key: str
+
+
+class MeetingStitchV1(BaseModel):
+    v: Literal[1] = 1
+    tenant_id: str
+    meeting_id: str
+
+
 MeetingStatus = Literal[
     "pending", "uploading", "processing", "transcribing", "partial", "done", "failed"
 ]

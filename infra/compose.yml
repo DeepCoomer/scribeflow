@@ -75,9 +75,30 @@ services:
         limits:
           memory: 512m
 
-  # Phase 1 pipeline worker (tickets 1.2–1.4). 1.5 GB is the whole "Python
-  # workers" line in the RAM budget — later stages (slicer, stitcher,
-  # extractor) share this allowance as more services on the same image.
+  # Phase 2 pipeline workers (tickets 2.2-2.5): one shared image, one
+  # entrypoint module per service — see docs/infrastructure.md for how each
+  # one's share of the RAM budget was derived (the diarizer is the outlier
+  # at 2 GB peak since it's the only one carrying pyannote/torch).
+  slicer:
+    build:
+      context: ../workers
+      dockerfile: Dockerfile
+    <<: *restart
+    command: ["uv", "run", "--no-sync", "python", "-m", "scribeflow_workers.slicer"]
+    env_file: ../workers/.env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-scribeflow}:${POSTGRES_PASSWORD:-scribeflow}@postgres:5432/${POSTGRES_DB:-scribeflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-scribeflow}:${RABBITMQ_PASSWORD:-scribeflow}@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
   transcriber:
     build:
       context: ../workers
@@ -97,7 +118,47 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536m
+          memory: 768m
+
+  diarizer:
+    build:
+      context: ../workers
+      dockerfile: Dockerfile
+    <<: *restart
+    command: ["uv", "run", "--no-sync", "python", "-m", "scribeflow_workers.diarizer"]
+    env_file: ../workers/.env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-scribeflow}:${POSTGRES_PASSWORD:-scribeflow}@postgres:5432/${POSTGRES_DB:-scribeflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-scribeflow}:${RABBITMQ_PASSWORD:-scribeflow}@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2048m
+
+  stitcher:
+    build:
+      context: ../workers
+      dockerfile: Dockerfile
+    <<: *restart
+    command: ["uv", "run", "--no-sync", "python", "-m", "scribeflow_workers.stitcher"]
+    env_file: ../workers/.env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-scribeflow}:${POSTGRES_PASSWORD:-scribeflow}@postgres:5432/${POSTGRES_DB:-scribeflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-scribeflow}:${RABBITMQ_PASSWORD:-scribeflow}@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
 
   # Public ingress (D39): Caddy terminates TLS with automatic Let's Encrypt
   # certs and proxies to the api container. VM-only — don't start this

@@ -16,6 +16,9 @@ PIPELINE_EXCHANGE = "pipeline"
 EVENTS_EXCHANGE = "events"
 
 MEETING_UPLOADED = "meeting.uploaded"
+CHUNK_TRANSCRIBE = "chunk.transcribe"
+MEETING_DIARIZE = "meeting.diarize"
+MEETING_STITCH = "meeting.stitch"
 
 PARKING_QUEUE = "q.parking"
 
@@ -47,13 +50,21 @@ def retry_queue_name(queue: str, tier_suffix: str) -> str:
     return f"{queue}.retry.{tier_suffix}"
 
 
-# Phase 1 (D45): the single-shot transcriber consumes meeting.uploaded
-# directly; a job is a whole meeting (minutes of work), so prefetch stays 1.
-# Phase 2 moves this binding to q.slicer, binds chunk.transcribe here, and
-# raises prefetch to 4 per docs/architecture.md.
-TRANSCRIBER_QUEUE = QueueSpec(name="q.transcriber", bindings=(MEETING_UPLOADED,))
+# Phase 2 (D45 realized): the slicer now owns meeting.uploaded; a job is a
+# whole meeting's ffmpeg work, so prefetch stays 1. The transcriber moves to
+# chunk.transcribe with prefetch 4 (IO-bound, competing consumers per
+# docs/architecture.md); the diarizer is CPU-bound so prefetch stays 1.
+SLICER_QUEUE = QueueSpec(name="q.slicer", bindings=(MEETING_UPLOADED,))
+TRANSCRIBER_QUEUE = QueueSpec(name="q.transcriber", bindings=(CHUNK_TRANSCRIBE,), prefetch=4)
+DIARIZER_QUEUE = QueueSpec(name="q.diarizer", bindings=(MEETING_DIARIZE,))
+STITCHER_QUEUE = QueueSpec(name="q.stitcher", bindings=(MEETING_STITCH,))
 
-WORK_QUEUES: tuple[QueueSpec, ...] = (TRANSCRIBER_QUEUE,)
+WORK_QUEUES: tuple[QueueSpec, ...] = (
+    SLICER_QUEUE,
+    TRANSCRIBER_QUEUE,
+    DIARIZER_QUEUE,
+    STITCHER_QUEUE,
+)
 
 
 def declare_topology(channel: BlockingChannel) -> None:
@@ -91,6 +102,16 @@ def declare_topology(channel: BlockingChannel) -> None:
 
     channel.queue_declare(
         PARKING_QUEUE, durable=True, arguments={"x-queue-type": "quorum"}
+    )
+
+    # Phase 1->2 migration (D45): q.transcriber used to bind meeting.uploaded
+    # directly. RabbitMQ never drops a binding just because the code stopped
+    # asserting it, so a broker that already ran Phase 1 keeps delivering
+    # meeting.uploaded to q.transcriber alongside the new chunk.transcribe
+    # binding unless it's explicitly removed. Unbinding a binding that isn't
+    # there (a fresh broker) is a no-op, so this is safe to run forever.
+    channel.queue_unbind(
+        TRANSCRIBER_QUEUE.name, PIPELINE_EXCHANGE, routing_key=MEETING_UPLOADED
     )
 
 

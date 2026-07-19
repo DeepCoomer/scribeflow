@@ -22,6 +22,13 @@
       "when": 1783842464480,
       "tag": "0002_chemical_polaris",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784375881469,
+      "tag": "0003_salty_exiles",
+      "breakpoints": true
     }
   ]
 }

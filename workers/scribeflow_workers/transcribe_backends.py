@@ -22,6 +22,12 @@ class Segment(BaseModel):
     end_s: float
     text: str
     words: list[dict[str, Any]] | None = None
+    # Whisper's own confidence signals (D48) — None when a backend doesn't
+    # provide them (e.g. some whisper.cpp builds); the hallucination filter
+    # in the chunk transcriber treats a missing field as "not suspicious".
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
+    compression_ratio: float | None = None
 
 
 class TranscribeBackend(Protocol):
@@ -42,6 +48,9 @@ def parse_verbose_json(payload: dict[str, Any]) -> list[Segment]:
                 end_s=float(seg["end"]),
                 text=text,
                 words=seg.get("words"),
+                no_speech_prob=seg.get("no_speech_prob"),
+                avg_logprob=seg.get("avg_logprob"),
+                compression_ratio=seg.get("compression_ratio"),
             )
         )
     return segments

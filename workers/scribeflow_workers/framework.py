@@ -30,6 +30,7 @@ from typing import Any, Callable, Protocol
 import pika
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.spec import Basic, BasicProperties
+from pydantic import BaseModel
 
 from .config import Settings
 from .logging import get_logger
@@ -37,6 +38,7 @@ from .messages import StatusEventV1
 from .topology import (
     EVENTS_EXCHANGE,
     PARKING_QUEUE,
+    PIPELINE_EXCHANGE,
     QueueSpec,
     declare_topology,
     retry_queue_name,
@@ -55,6 +57,10 @@ class PermanentError(Exception):
 
 class JobContext(Protocol):
     def publish_event(self, event: StatusEventV1) -> None: ...
+    def publish(self, routing_key: str, message: BaseModel) -> None:
+        """Publish a job onto the pipeline exchange (e.g. a slicer emitting
+        chunk.transcribe jobs, or a chunk worker triggering meeting.stitch)."""
+        ...
 
 
 Handler = Callable[[dict[str, Any], JobContext], None]
@@ -67,6 +73,9 @@ class _Context:
 
     def publish_event(self, event: StatusEventV1) -> None:
         self._worker._publish_event_threadsafe(event)
+
+    def publish(self, routing_key: str, message: BaseModel) -> None:
+        self._worker._publish_threadsafe(routing_key, message)
 
 
 class Worker:
@@ -275,6 +284,17 @@ class Worker:
 
     def _publish_event_threadsafe(self, event: StatusEventV1) -> None:
         self._threadsafe(functools.partial(self._publish_event, event))
+
+    def _publish(self, routing_key: str, message: BaseModel) -> None:
+        self._require_channel().basic_publish(
+            exchange=PIPELINE_EXCHANGE,
+            routing_key=routing_key,
+            body=message.model_dump_json().encode(),
+            properties=BasicProperties(delivery_mode=2, content_type="application/json"),
+        )
+
+    def _publish_threadsafe(self, routing_key: str, message: BaseModel) -> None:
+        self._threadsafe(functools.partial(self._publish, routing_key, message))
 
     def _finish_in_flight(self) -> None:
         self._in_flight = None

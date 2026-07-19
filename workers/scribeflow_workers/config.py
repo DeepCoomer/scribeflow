@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # {output_json} are substituted. Only used when transcribe_backend=local.
     local_whisper_cmd: str = ""
 
+    # D23: pyannote's pretrained pipeline is a gated HF model — needs a token
+    # with the license accepted (docs/infrastructure.md setup step 7).
+    hf_token: str = ""
+    pyannote_model: str = "pyannote/speaker-diarization-3.1"
+
     log_level: str = "INFO"
 
     @property

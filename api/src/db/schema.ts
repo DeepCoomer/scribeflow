@@ -83,6 +83,10 @@ export const meetings = pgTable(
     totalChunks: integer("total_chunks").notNull().default(0),
     chunksDone: integer("chunks_done").notNull().default(0),
     diarizationDone: boolean("diarization_done").notNull().default(false),
+    // Set by the diarizer's exhausted-hook (D50); non-null tells the
+    // stitcher diarization gave up, forcing the terminal status to
+    // `partial` even when every chunk transcribed cleanly.
+    diarizationError: text("diarization_error"),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -101,6 +105,10 @@ export const jobStatusEnum = pgEnum("job_status", [
   "running",
   "done",
   "failed",
+  // Terminal: retries exhausted (D49). Distinct from "failed" (which the
+  // job ledger already used for a single failed attempt still eligible for
+  // retry) — "exhausted" is what the retry ladder's parking lot means.
+  "exhausted",
 ]);
 
 export const jobs = pgTable(
@@ -194,6 +202,37 @@ export const transcriptSegments = pgTable(
     index("transcript_segments_meeting_chunk_idx").on(t.meetingId, t.chunkIdx),
   ],
 );
+
+// --- transcript_gaps ---------------------------------------------------------
+// Written by the stitcher (D49) when one or more chunks exhausted retries:
+// each row is an uncovered interval of meeting time, replacing (delete +
+// reinsert) on every stitch run so a redelivered stitch can't duplicate rows.
+
+export const transcriptGaps = pgTable("transcript_gaps", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  meetingId: uuid("meeting_id")
+    .notNull()
+    .references(() => meetings.id, { onDelete: "cascade" }),
+  startS: doublePrecision("start_s").notNull(),
+  endS: doublePrecision("end_s").notNull(),
+  reason: text("reason").notNull(),
+});
+
+// --- speaker_turns -----------------------------------------------------------
+// Raw pyannote output (ticket 2.5) — one row per speaker turn on the full
+// file. Ticket 2.6 reads this alongside transcript_segments to assign a
+// speaker to each segment by maximum temporal overlap (D13); nothing reads
+// speaker_turns directly before that merge runs.
+
+export const speakerTurns = pgTable("speaker_turns", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  meetingId: uuid("meeting_id")
+    .notNull()
+    .references(() => meetings.id, { onDelete: "cascade" }),
+  speakerLabel: text("speaker_label").notNull(),
+  startS: doublePrecision("start_s").notNull(),
+  endS: doublePrecision("end_s").notNull(),
+});
 
 // --- rate_limiter_buckets ---------------------------------------------------
 // Backing row for the shared Groq token bucket (D24): workers take a Postgres

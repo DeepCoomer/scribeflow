@@ -3,7 +3,7 @@ import amqplib from "amqplib";
 import { loadEnv } from "../config.js";
 import { buildApp } from "../app.js";
 import { transcriptSegments } from "../db/schema.js";
-import { TRANSCRIBER_QUEUE } from "../queue/topology.js";
+import { SLICER_QUEUE } from "../queue/topology.js";
 import { meetingUploadedV1 } from "../queue/messages.js";
 
 // Integration tests for tickets 1.1/1.5/1.6: need the compose Postgres
@@ -68,7 +68,7 @@ describe("upload flow (1.1)", () => {
     // Drain the work queue so the assertion below sees only our message.
     const conn = await amqplib.connect(env.RABBITMQ_URL);
     const ch = await conn.createChannel();
-    await ch.purgeQueue(TRANSCRIBER_QUEUE.name);
+    await ch.purgeQueue(SLICER_QUEUE.name);
 
     const urlRes = await app.inject({
       method: "POST",
@@ -93,10 +93,11 @@ describe("upload flow (1.1)", () => {
     expect(doneRes.statusCode).toBe(200);
     expect(doneRes.json().status).toBe("processing");
 
-    // The contract message must be on q.transcriber and parse as v1.
+    // The contract message must be on q.slicer (D45 realized: the slicer,
+    // not the transcriber, now owns meeting.uploaded) and parse as v1.
     let raw: amqplib.GetMessage | false = false;
     for (let i = 0; i < 20 && !raw; i++) {
-      raw = await ch.get(TRANSCRIBER_QUEUE.name, { noAck: true });
+      raw = await ch.get(SLICER_QUEUE.name, { noAck: true });
       if (!raw) await new Promise((r) => setTimeout(r, 100));
     }
     expect(raw).not.toBe(false);
@@ -118,7 +119,7 @@ describe("upload flow (1.1)", () => {
       payload: {},
     });
     expect(again.statusCode).toBe(200);
-    const extra = await ch.get(TRANSCRIBER_QUEUE.name, { noAck: true });
+    const extra = await ch.get(SLICER_QUEUE.name, { noAck: true });
     expect(extra).toBe(false);
 
     await conn.close();

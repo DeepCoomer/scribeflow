@@ -81,6 +81,284 @@ def fail_job(conn: psycopg.Connection[Any], job_key: str, error: str) -> None:
 # -- meetings -----------------------------------------------------------------
 
 
+def init_chunk_plan(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    meeting_id: str,
+    total_chunks: int,
+    duration_s: int,
+) -> None:
+    """Guarded by `total_chunks = 0` so a redelivered slicer job (same
+    deterministic plan, since it recomputes from the same ffprobe duration)
+    never resets counters mid-flight (D46)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE meetings
+            SET total_chunks = %s, duration_s = %s
+            WHERE id = %s AND tenant_id = %s AND total_chunks = 0
+            """,
+            (total_chunks, duration_s, meeting_id, tenant_id),
+        )
+    conn.commit()
+
+
+@dataclass(frozen=True)
+class FanIn:
+    chunks_done: int
+    total_chunks: int
+    diarization_done: bool
+    status: str
+
+
+def get_fan_in(conn: psycopg.Connection[Any], meeting_id: str) -> FanIn:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT chunks_done, total_chunks, diarization_done, status "
+            "FROM meetings WHERE id = %s",
+            (meeting_id,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    assert row is not None
+    return FanIn(
+        chunks_done=row[0], total_chunks=row[1], diarization_done=row[2], status=row[3]
+    )
+
+
+def set_diarization_done(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    meeting_id: str,
+    error: str | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE meetings SET diarization_done = true, diarization_error = %s
+            WHERE id = %s AND tenant_id = %s
+            """,
+            (error, meeting_id, tenant_id),
+        )
+    conn.commit()
+
+
+@dataclass(frozen=True)
+class ChunkCompletion:
+    # False when this call observed an already-terminal job (redelivery) —
+    # the exactly-once guard for the chunks_done increment (D50).
+    transitioned: bool
+    chunks_done: int
+    total_chunks: int
+
+
+def complete_chunk_job(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    meeting_id: str,
+    chunk_idx: int,
+    job_key: str,
+    segments: list[SegmentRow],
+) -> ChunkCompletion:
+    """Segments + job completion + fan-in counter in one transaction (D50):
+    the conditional job-status transition is the exactly-once guard for the
+    counter increment, so a crash-and-redeliver can't double-count."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM meetings WHERE id = %s AND tenant_id = %s",
+            (meeting_id, tenant_id),
+        )
+        if cur.fetchone() is None:
+            conn.rollback()
+            raise ValueError(f"meeting {meeting_id} not found for tenant {tenant_id}")
+
+        cur.execute(
+            "DELETE FROM transcript_segments WHERE meeting_id = %s AND chunk_idx = %s",
+            (meeting_id, chunk_idx),
+        )
+        cur.executemany(
+            """
+            INSERT INTO transcript_segments
+              (meeting_id, chunk_idx, start_s, end_s, text, words_jsonb)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    meeting_id,
+                    chunk_idx,
+                    seg.start_s,
+                    seg.end_s,
+                    seg.text,
+                    json.dumps(seg.words) if seg.words is not None else None,
+                )
+                for seg in segments
+            ],
+        )
+        transitioned, chunks_done, total_chunks = _transition_and_count(
+            cur, meeting_id, job_key, "done"
+        )
+    conn.commit()
+    return ChunkCompletion(transitioned, chunks_done, total_chunks)
+
+
+def exhaust_chunk_job(
+    conn: psycopg.Connection[Any], meeting_id: str, job_key: str
+) -> ChunkCompletion:
+    """Terminal state for a chunk that exhausted its retries (D49): no
+    segments are written, but fan-in still needs to close, so the counter
+    increments under the same exactly-once guard as a successful chunk."""
+    with conn.cursor() as cur:
+        transitioned, chunks_done, total_chunks = _transition_and_count(
+            cur, meeting_id, job_key, "exhausted"
+        )
+    conn.commit()
+    return ChunkCompletion(transitioned, chunks_done, total_chunks)
+
+
+def _transition_and_count(
+    cur: psycopg.Cursor[Any], meeting_id: str, job_key: str, terminal_status: str
+) -> tuple[bool, int, int]:
+    cur.execute(
+        "UPDATE jobs SET status = %s::job_status, updated_at = now() "
+        "WHERE job_key = %s AND status <> %s::job_status RETURNING job_key",
+        (terminal_status, job_key, terminal_status),
+    )
+    transitioned = cur.fetchone() is not None
+    if transitioned:
+        cur.execute(
+            "UPDATE meetings SET chunks_done = chunks_done + 1 "
+            "WHERE id = %s RETURNING chunks_done, total_chunks",
+            (meeting_id,),
+        )
+    else:
+        cur.execute(
+            "SELECT chunks_done, total_chunks FROM meetings WHERE id = %s",
+            (meeting_id,),
+        )
+    row = cur.fetchone()
+    assert row is not None
+    return transitioned, row[0], row[1]
+
+
+def get_chunk_statuses(conn: psycopg.Connection[Any], meeting_id: str) -> dict[int, str]:
+    """Per-chunk terminal state (done/exhausted) for the transcribe stage,
+    keyed by chunk_idx parsed from the deterministic job key (D15)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT job_key, status FROM jobs WHERE meeting_id = %s AND stage = %s",
+            (meeting_id, "transcribe"),
+        )
+        rows = cur.fetchall()
+    conn.commit()
+    return {int(job_key.rsplit(":", 1)[-1]): status for job_key, status in rows}
+
+
+@dataclass(frozen=True)
+class StitchSegmentRow:
+    id: str
+    chunk_idx: int
+    start_s: float
+    end_s: float
+
+
+@dataclass(frozen=True)
+class StitchInfo:
+    duration_s: float
+    total_chunks: int
+    diarization_error: str | None
+
+
+def get_stitch_info(conn: psycopg.Connection[Any], meeting_id: str) -> StitchInfo:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT duration_s, total_chunks, diarization_error FROM meetings WHERE id = %s",
+            (meeting_id,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    assert row is not None
+    return StitchInfo(duration_s=row[0], total_chunks=row[1], diarization_error=row[2])
+
+
+def get_segments_for_stitch(
+    conn: psycopg.Connection[Any], meeting_id: str
+) -> list[StitchSegmentRow]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, chunk_idx, start_s, end_s FROM transcript_segments "
+            "WHERE meeting_id = %s",
+            (meeting_id,),
+        )
+        rows = cur.fetchall()
+    conn.commit()
+    return [
+        StitchSegmentRow(id=str(r[0]), chunk_idx=r[1], start_s=r[2], end_s=r[3]) for r in rows
+    ]
+
+
+@dataclass(frozen=True)
+class StitchFinalization:
+    tenant_id: str
+    meeting_id: str
+    drop_segment_ids: list[str]
+    gaps: list[tuple[float, float]]
+    status: str
+    error: str | None = None
+
+
+def finalize_stitch(conn: psycopg.Connection[Any], finalization: StitchFinalization) -> None:
+    """Deletes losing overlap segments, replaces the gap markers, and sets
+    the terminal status — one transaction, so a crash mid-stitch can't leave
+    duplicate segments or duplicate gap rows behind (re-running produces the
+    same keep/drop decision and the same gap set, D49/D11)."""
+    with conn.cursor() as cur:
+        if finalization.drop_segment_ids:
+            cur.execute(
+                "DELETE FROM transcript_segments WHERE id = ANY(%s)",
+                (finalization.drop_segment_ids,),
+            )
+        cur.execute(
+            "DELETE FROM transcript_gaps WHERE meeting_id = %s", (finalization.meeting_id,)
+        )
+        cur.executemany(
+            """
+            INSERT INTO transcript_gaps (meeting_id, start_s, end_s, reason)
+            VALUES (%s, %s, %s, %s)
+            """,
+            [
+                (finalization.meeting_id, start, end, "chunk_failed")
+                for start, end in finalization.gaps
+            ],
+        )
+        cur.execute(
+            "UPDATE meetings SET status = %s, error = %s WHERE id = %s AND tenant_id = %s",
+            (
+                finalization.status,
+                finalization.error,
+                finalization.meeting_id,
+                finalization.tenant_id,
+            ),
+        )
+    conn.commit()
+
+
+def insert_speaker_turns(
+    conn: psycopg.Connection[Any], meeting_id: str, turns: list[tuple[str, float, float]]
+) -> None:
+    """Replace-by-meeting (redelivery-safe, mirrors replace_segments): raw
+    pyannote turns land here for ticket 2.6's speaker merge to consume."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM speaker_turns WHERE meeting_id = %s", (meeting_id,))
+        cur.executemany(
+            """
+            INSERT INTO speaker_turns (meeting_id, speaker_label, start_s, end_s)
+            VALUES (%s, %s, %s, %s)
+            """,
+            [(meeting_id, speaker, start, end) for speaker, start, end in turns],
+        )
+    conn.commit()
+
+
 def set_meeting_status(
     conn: psycopg.Connection[Any],
     tenant_id: str,

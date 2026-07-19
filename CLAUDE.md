@@ -13,8 +13,10 @@ pipeline). **1.7 (Vercel) is live** at `scribeflow.deepcoomer.dev`. **1.8
 (single-AD region, no alternate AD to retry) — see
 `docs/oracle-vm-setup.md` for the exact config to use once capacity frees
 up. **2.1 (racing-engine spec) is done** — edge cases specified in
-`docs/architecture.md` + D46–D50. Next: 2.2 (slicer, Opus), one ticket per
-session per `docs/plan.md`. The
+`docs/architecture.md` + D46–D50. **2.2–2.5 (slicer, chunk transcriber,
+stitcher, diarizer) are done** — see `docs/plan.md`'s Phase 2 status for
+what was verified and the model-assignment deviation. Next: 2.6 (speaker
+merge design, Fable), per `docs/plan.md`. The
 design in `docs/` is authoritative — read the relevant doc before implementing, and
 update it when reality diverges.
 

@@ -20,6 +20,9 @@ export const EVENTS_EXCHANGE = "events";
 
 export const ROUTING_KEYS = {
   meetingUploaded: "meeting.uploaded",
+  chunkTranscribe: "chunk.transcribe",
+  meetingDiarize: "meeting.diarize",
+  meetingStitch: "meeting.stitch",
 } as const;
 
 export const RETRY_TIERS = [
@@ -40,15 +43,36 @@ export type QueueSpec = {
   bindings: readonly string[];
 };
 
-// Phase 1: the single-shot transcriber consumes meeting.uploaded directly
-// (D45). When the slicer lands in Phase 2, q.slicer takes this binding and
-// q.transcriber gets chunk.transcribe instead.
-export const TRANSCRIBER_QUEUE: QueueSpec = {
-  name: "q.transcriber",
+// Phase 2 (D45 realized): the slicer owns meeting.uploaded; the transcriber
+// moves to chunk.transcribe, and the diarizer/stitcher queues are new.
+// Prefetch is a consumer-side (Python) concern, not a queue-declare argument,
+// so it isn't mirrored here — see workers/scribeflow_workers/topology.py.
+export const SLICER_QUEUE: QueueSpec = {
+  name: "q.slicer",
   bindings: [ROUTING_KEYS.meetingUploaded],
 };
 
-export const WORK_QUEUES: readonly QueueSpec[] = [TRANSCRIBER_QUEUE];
+export const TRANSCRIBER_QUEUE: QueueSpec = {
+  name: "q.transcriber",
+  bindings: [ROUTING_KEYS.chunkTranscribe],
+};
+
+export const DIARIZER_QUEUE: QueueSpec = {
+  name: "q.diarizer",
+  bindings: [ROUTING_KEYS.meetingDiarize],
+};
+
+export const STITCHER_QUEUE: QueueSpec = {
+  name: "q.stitcher",
+  bindings: [ROUTING_KEYS.meetingStitch],
+};
+
+export const WORK_QUEUES: readonly QueueSpec[] = [
+  SLICER_QUEUE,
+  TRANSCRIBER_QUEUE,
+  DIARIZER_QUEUE,
+  STITCHER_QUEUE,
+];
 
 export function retryQueueName(queue: string, tierSuffix: string): string {
   return `${queue}.retry.${tierSuffix}`;

@@ -99,23 +99,34 @@ Segments are the atomic unit: they are **kept or dropped whole, never split** �
 meeting time (timestamps were already shifted at the chunk worker, D16).
 
 Define cut points `c_i = (i+1)·290 + 5` — the midpoint of the overlap between
-chunk _i_ and _i+1_ — with `c_{-1} = −∞` and `c_{n-1} = +∞`.
+chunk _i_ and _i+1_ — with `c_{-1} = −∞` and `c_{n-1} = +∞`. "Present" means
+chunk _i_'s transcribe job reached status `done` (D54) — not "has segment
+rows": a chunk that succeeded but produced zero segments after the
+hallucination filter (D48) is still present, so its neighbors trim normally;
+only a chunk whose job is `exhausted` is treated as absent.
 
 1. **Side assignment.** Chunk _i_ keeps exactly those of its segments whose
    temporal midpoint `(start + end) / 2` lies in `[c_{i-1}, c_i)`; the rest of
    its segments are dropped. Half-open intervals mean a midpoint landing
    exactly on a cut belongs to the later chunk — no segment can be claimed by
-   both sides or by neither.
+   both sides or by neither. **A cut only applies when both of its chunks are
+   present (D54):** if chunk _i+1_ is absent, `c_i` is treated as `+∞` for
+   chunk _i_ (nothing to hand off to, so nothing gets trimmed there); if
+   chunk _i-1_ is absent, `c_{i-1}` is treated as `−∞` for chunk _i_
+   symmetrically. Blindly trimming at a cut next to a failed neighbor would
+   discard good transcript for no reason — there's nothing on the other side
+   to deduplicate against.
 2. **Cross-cut duplicate sweep.** The same utterance can survive rule 1 twice
    when Whisper timestamps it slightly differently in each chunk (one version's
-   midpoint just before `c_i`, the other's just after). After rule 1, for each
-   cut `c_i`, compare every kept segment of chunk _i_ against every kept
-   segment of chunk _i+1_ that overlaps it in time: if the pair overlaps by
-   **more than 50 % of the shorter segment's duration**, they are the same
-   utterance — keep the version with the larger **edge distance** and drop the
-   other. Edge distance measures how far the segment sits from its source
-   chunk's unreliable edge: for chunk _i_ it is `(i·290 + 300) − end`; for
-   chunk _i+1_ it is `start − (i+1)·290`. (Whisper is least reliable at chunk
+   midpoint just before `c_i`, the other's just after). For each cut `c_i`
+   where **both** chunk _i_ and chunk _i+1_ are present, compare every kept
+   segment of chunk _i_ against every kept segment of chunk _i+1_ that
+   overlaps it in time: if the pair overlaps by **more than 50 % of the
+   shorter segment's duration**, they are the same utterance — keep the
+   version with the larger **edge distance** and drop the other. Edge
+   distance measures how far the segment sits from its source chunk's
+   unreliable edge: for chunk _i_ it is `(i·290 + 300) − end`; for chunk
+   _i+1_ it is `start − (i+1)·290`. (Whisper is least reliable at chunk
    edges, so the version recorded further from an edge wins.)
 3. **Ties** (equal edge distance) go to the lower chunk index.
 
@@ -222,10 +233,14 @@ exchange: events (fanout) → per-API-instance exclusive queue (SSE forwarding)
 each work queue → tiered retry queues (30s/2m/10m TTL), then q.parking
 ```
 
-> **Phase 1 interim (D45):** until the slicer lands, `meeting.uploaded` binds
-> to `q.transcriber` (single-shot transcription, prefetch 1). The topology is
-> declared as code in `api/src/queue/topology.ts` and mirrored exactly in
-> `workers/scribeflow_workers/topology.py`; both sides assert it on connect.
+> **D45 realized:** the slicer now owns `meeting.uploaded`; the transcriber
+> moved to `chunk.transcribe`. The topology is declared as code in
+> `api/src/queue/topology.ts` and mirrored exactly in
+> `workers/scribeflow_workers/topology.py`; both sides assert it on connect —
+> including an explicit unbind of `q.transcriber`'s old `meeting.uploaded`
+> binding (D53), since a broker that already ran Phase 1 keeps a stale
+> binding around forever otherwise (RabbitMQ doesn't drop one just because
+> the code stopped asserting it).
 >
 > **Retry mechanics (D43):** the worker framework republishes a failed message
 > to the retry tier matching its `x-attempts` header and acks the original;
@@ -250,10 +265,13 @@ tenants(id, name, slug, created_at)
 users(id, tenant_id, email, name, role, google_refresh_token_enc)
 meetings(id, tenant_id, title, calendar_event_id, meet_url, started_at,
          duration_s, status, r2_key, total_chunks, chunks_done,
-         diarization_done, error)
+         diarization_done, diarization_error, error)
 transcript_segments(id, meeting_id, chunk_idx, speaker, start_s, end_s,
                     text, words_jsonb)
 transcript_gaps(id, meeting_id, start_s, end_s, reason)   -- written at stitch (D49)
+speaker_turns(id, meeting_id, speaker_label, start_s, end_s)  -- raw pyannote (2.5);
+                                                               -- ticket 2.6 merges into
+                                                               -- transcript_segments
 action_items(id, meeting_id, tenant_id, text, owner_user_id, due_date,
              confidence, status, source_segment_id)
 bot_sessions(id, meeting_id, container_id, state, joined_at, left_at, error)

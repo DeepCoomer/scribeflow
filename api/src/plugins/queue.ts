@@ -7,6 +7,8 @@ import {
   WORK_QUEUES,
   RETRY_TIERS,
   PARKING_QUEUE,
+  ROUTING_KEYS,
+  TRANSCRIBER_QUEUE,
   retryQueueName,
 } from "../queue/topology.js";
 
@@ -57,6 +59,18 @@ async function assertTopology(ch: ConfirmChannel) {
     durable: true,
     arguments: { "x-queue-type": "quorum" },
   });
+
+  // Phase 1->2 migration (D45): q.transcriber used to bind meeting.uploaded
+  // directly. RabbitMQ never drops a binding just because the code stopped
+  // asserting it, so a broker that already ran Phase 1 keeps delivering
+  // meeting.uploaded to q.transcriber alongside the new chunk.transcribe
+  // binding unless it's explicitly removed. Unbinding a binding that isn't
+  // there (a fresh broker) is a no-op, so this is safe to run forever.
+  await ch.unbindQueue(
+    TRANSCRIBER_QUEUE.name,
+    PIPELINE_EXCHANGE,
+    ROUTING_KEYS.meetingUploaded,
+  );
 }
 
 // Owns the AMQP connection lifecycle: connect on boot, reconnect with capped

@@ -12,6 +12,13 @@ dependencies = [
     "groq>=0.15",
 ]
 
+# pyannote.audio (+ torch) is a multi-GB transitive install; kept out of the
+# default dependency set so `uv sync`/CI stay fast (PyannoteBackend imports
+# it lazily, ticket 2.5). The diarizer's runtime image installs this extra
+# explicitly (workers/Dockerfile).
+[project.optional-dependencies]
+diarize = ["pyannote.audio>=3.1"]
+
 [dependency-groups]
 dev = ["pytest>=8.3", "ruff>=0.8", "mypy>=1.14"]
 
@@ -23,9 +30,11 @@ target-version = "py312"
 strict = true
 
 # pika and boto3 ship no type information; their surface in this codebase is
-# wrapped in typed helpers (framework.py, r2.py) so Any stops there.
+# wrapped in typed helpers (framework.py, r2.py) so Any stops there. pyannote
+# isn't installed by default (see the `diarize` extra above) so mypy never
+# sees real stubs for it either.
 [[tool.mypy.overrides]]
-module = ["pika", "pika.*", "boto3", "boto3.*", "botocore.*"]
+module = ["pika", "pika.*", "boto3", "boto3.*", "botocore.*", "pyannote", "pyannote.*"]
 ignore_missing_imports = true
 
 [build-system]
@@ -36,4 +45,7 @@ build-backend = "hatchling.build"
 packages = ["scribeflow_workers"]
 
 [project.scripts]
+slicer = "scribeflow_workers.slicer:main"
 transcriber = "scribeflow_workers.transcriber:main"
+diarizer = "scribeflow_workers.diarizer:main"
+stitcher = "scribeflow_workers.stitcher:main"

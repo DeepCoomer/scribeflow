@@ -26,15 +26,15 @@ Domain renewal for `deepcoomer.dev` is the only pre-existing cost; no new spend.
   is final (keep transcripts/metrics forever — they live in Postgres).
 - **12 GB RAM budget on the VM:**
 
-  | Service                                     | Reserved |
-  | ------------------------------------------- | -------- |
-  | Postgres                                    | 1 GB     |
-  | RabbitMQ                                    | 0.75 GB  |
-  | API + Caddy ingress                         | 0.75 GB  |
-  | Python workers (transcribe/stitch/extract)  | 1.5 GB   |
-  | pyannote diarizer (peak)                    | 2 GB     |
-  | 2 Meet-bot containers (Chromium + Xvfb × 2) | 4 GB     |
-  | Headroom / page cache                       | 2 GB     |
+  | Service                                          | Reserved |
+  | ------------------------------------------------ | -------- |
+  | Postgres                                         | 1 GB     |
+  | RabbitMQ                                         | 0.75 GB  |
+  | API + Caddy ingress                              | 0.75 GB  |
+  | Python workers (slice/transcribe/stitch/extract) | 1.5 GB   |
+  | pyannote diarizer (peak)                         | 2 GB     |
+  | 2 Meet-bot containers (Chromium + Xvfb × 2)      | 4 GB     |
+  | Headroom / page cache                            | 2 GB     |
 
   Dropping ClickHouse (D42) freed 3 GB, which buys the **second concurrent
   bot-recorded meeting**. The orchestrator enforces the cap with a semaphore
@@ -89,8 +89,11 @@ List and ufw); both must allow the ports.
 5. R2: create bucket `scribeflow`, scoped API token (that bucket only), CORS for
    `scribeflow.deepcoomer.dev`.
 6. Groq: store the existing key as a secret; set alert logging when a 429 is seen.
-7. Hugging Face: accept pyannote model licenses, store HF token for model download
-   (baked into the worker image at build time, not at runtime).
+7. Hugging Face: accept the pyannote model licenses on huggingface.co, then set
+   `HF_TOKEN` in the VM's `.env` like every other secret (invariant 8) —
+   `PyannoteBackend` passes it to `Pipeline.from_pretrained` at worker startup,
+   so the model downloads (and caches) on first run rather than being baked
+   into the image.
 8. Google Cloud project: OAuth consent (testing mode), Calendar API enabled,
    client credentials as secrets.
 9. Backups: nightly `pg_dump` → R2 (counts inside the 10 GB; keep 7 days).

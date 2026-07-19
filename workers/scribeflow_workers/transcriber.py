@@ -1,10 +1,11 @@
-"""Single-shot transcription worker (ticket 1.4): meeting.uploaded → download
-from R2 → Whisper backend → transcript_segments, publishing status events at
-each transition. Phase 2 repurposes this worker for chunk jobs; the offset
-shift is already in place (0 for a whole file) so timestamps are absolute
-meeting time from day one (invariant 4).
+"""Chunk transcriber (ticket 2.3): chunk.transcribe -> download the chunk
+from R2 -> Whisper backend -> hallucination filter (D48) -> timestamp shift
+-> transcript_segments, with the fan-in counter and stitch trigger (D50)
+folded into the same transaction as the segment write.
 
-Run: python -m scribeflow_workers.transcriber
+Phase 1's single-shot worker used to live here (whole meeting = chunk 0,
+offset 0); the slicer (ticket 2.2) now owns that shape, so this module is
+chunk-only. Run: python -m scribeflow_workers.transcriber
 """
 
 from __future__ import annotations
@@ -16,15 +17,21 @@ from typing import Any
 
 from . import db, r2, rate_limiter
 from .config import Settings, get_settings
+from .db import ChunkCompletion, SegmentRow
 from .framework import JobContext, PermanentError, Worker
 from .logging import configure_logging, get_logger
-from .messages import MeetingUploadedV1, StatusEventV1
-from .topology import TRANSCRIBER_QUEUE
-from .transcribe_backends import TranscribeBackend, create_backend
+from .messages import ChunkTranscribeV1, MeetingStitchV1
+from .topology import MEETING_STITCH, TRANSCRIBER_QUEUE
+from .transcribe_backends import Segment, TranscribeBackend, create_backend
 
 log = get_logger("transcriber")
 
 STAGE = "transcribe"
+
+# Whisper's own non-speech/repetition heuristics (D48).
+NO_SPEECH_PROB_THRESHOLD = 0.6
+AVG_LOGPROB_THRESHOLD = -1.0
+COMPRESSION_RATIO_THRESHOLD = 2.4
 
 
 @dataclass
@@ -40,53 +47,76 @@ class Deps:
     rate_limited: bool
 
 
-def job_key(meeting_id: str, chunk_idx: int = 0) -> str:
+def job_key(meeting_id: str, chunk_idx: int) -> str:
     return f"{meeting_id}:{STAGE}:{chunk_idx}"
 
 
-def handle_meeting_uploaded(
-    payload: dict[str, Any], ctx: JobContext, deps: Deps
-) -> None:
-    try:
-        msg = MeetingUploadedV1.model_validate(payload)
-    except ValueError as err:
-        raise PermanentError(f"invalid meeting.uploaded message: {err}") from err
+def is_hallucinated(seg: Segment) -> bool:
+    if (
+        seg.no_speech_prob is not None
+        and seg.avg_logprob is not None
+        and seg.no_speech_prob > NO_SPEECH_PROB_THRESHOLD
+        and seg.avg_logprob < AVG_LOGPROB_THRESHOLD
+    ):
+        return True
+    return (
+        seg.compression_ratio is not None
+        and seg.compression_ratio > COMPRESSION_RATIO_THRESHOLD
+    )
 
-    key = job_key(msg.meeting_id)
+
+def _maybe_trigger_stitch(
+    conn: Any, tenant_id: str, meeting_id: str, completion: ChunkCompletion, ctx: JobContext
+) -> None:
+    if completion.chunks_done < completion.total_chunks:
+        return
+    if not db.get_fan_in(conn, meeting_id).diarization_done:
+        return
+    ctx.publish(
+        MEETING_STITCH, MeetingStitchV1(tenant_id=tenant_id, meeting_id=meeting_id)
+    )
+
+
+def handle_chunk_transcribe(payload: dict[str, Any], ctx: JobContext, deps: Deps) -> None:
+    try:
+        msg = ChunkTranscribeV1.model_validate(payload)
+    except ValueError as err:
+        raise PermanentError(f"invalid chunk.transcribe message: {err}") from err
+
+    key = job_key(msg.meeting_id, msg.chunk_idx)
     try:
         _run(msg, ctx, deps, key)
     except Exception:
         # deps.conn is one connection reused for this worker process's whole
-        # lifetime (db.connect() runs once in main()). psycopg does not
-        # auto-rollback on a Python exception — without this, any failed
-        # statement (claim_job included) leaves the transaction aborted, and
-        # every subsequent job on this process fails at its very first
-        # query forever, with nothing written to the jobs table to show it.
+        # lifetime — without this, a failed statement leaves the transaction
+        # aborted and every later job on this process fails at its first
+        # query forever (the bug the Phase 1 postmortem found).
         deps.conn.rollback()
         raise
 
 
-def _run(msg: MeetingUploadedV1, ctx: JobContext, deps: Deps, key: str) -> None:
+def _run(msg: ChunkTranscribeV1, ctx: JobContext, deps: Deps, key: str) -> None:
     if not db.claim_job(deps.conn, msg.tenant_id, msg.meeting_id, key, STAGE):
         log.info("job.skipped_already_done", job_key=key)
+        # A crash between the fan-in commit and publishing meeting.stitch
+        # (D50) resurfaces here: the redelivered message finds its job
+        # already done, so re-check whether fan-in is closed and, if the
+        # meeting hasn't been stitched yet, republish — harmless if the
+        # stitcher already ran, since its own claim_job dedups.
+        fan_in = db.get_fan_in(deps.conn, msg.meeting_id)
+        if (
+            fan_in.chunks_done >= fan_in.total_chunks
+            and fan_in.diarization_done
+            and fan_in.status == "transcribing"
+        ):
+            ctx.publish(
+                MEETING_STITCH,
+                MeetingStitchV1(tenant_id=msg.tenant_id, meeting_id=msg.meeting_id),
+            )
         return
 
     r2.assert_tenant_key(msg.r2_key, msg.tenant_id)
 
-    def transition(status: Any, error: str | None = None, duration_s: int | None = None) -> None:
-        db.set_meeting_status(
-            deps.conn, msg.tenant_id, msg.meeting_id, status, error, duration_s
-        )
-        ctx.publish_event(
-            StatusEventV1(
-                tenant_id=msg.tenant_id,
-                meeting_id=msg.meeting_id,
-                status=status,
-                error=error,
-            )
-        )
-
-    transition("transcribing")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             audio_path = r2.download(
@@ -94,57 +124,55 @@ def _run(msg: MeetingUploadedV1, ctx: JobContext, deps: Deps, key: str) -> None:
             )
             if deps.rate_limited:
                 rate_limiter.wait_for_token(deps.conn)
-            segments = deps.backend.transcribe(audio_path)
+            raw_segments = deps.backend.transcribe(audio_path)
 
-        # Single-shot: the whole file is chunk 0 with offset 0 — the shift is
-        # a no-op here but keeps the "absolute time at the worker boundary"
-        # rule (D16) uniform with Phase 2 chunk jobs.
-        offset_s = 0.0
         rows = [
-            db.SegmentRow(
-                start_s=seg.start_s + offset_s,
-                end_s=seg.end_s + offset_s,
+            SegmentRow(
+                start_s=seg.start_s + msg.offset_s,
+                end_s=seg.end_s + msg.offset_s,
                 text=seg.text,
                 words=seg.words,
             )
-            for seg in segments
+            for seg in raw_segments
+            if not is_hallucinated(seg)
         ]
-        db.replace_segments(deps.conn, msg.tenant_id, msg.meeting_id, 0, rows)
-
-        duration_s = int(max((row.end_s for row in rows), default=0))
-        transition("done", duration_s=duration_s or None)
-        db.complete_job(deps.conn, key)
-        log.info(
-            "meeting.transcribed",
-            meeting_id=msg.meeting_id,
-            segments=len(rows),
-            duration_s=duration_s,
+        completion = db.complete_chunk_job(
+            deps.conn, msg.tenant_id, msg.meeting_id, msg.chunk_idx, key, rows
         )
+        log.info(
+            "chunk.transcribed",
+            meeting_id=msg.meeting_id,
+            chunk_idx=msg.chunk_idx,
+            segments=len(rows),
+            chunks_done=completion.chunks_done,
+            total_chunks=completion.total_chunks,
+        )
+        _maybe_trigger_stitch(deps.conn, msg.tenant_id, msg.meeting_id, completion, ctx)
     except Exception as err:
         db.fail_job(deps.conn, key, repr(err))
         raise
 
 
 def make_on_exhausted(deps: Deps) -> Any:
-    """After the last retry, the meeting itself is marked failed so the
-    dashboard shows a terminal state instead of an eternal spinner."""
+    """After the last retry, the chunk is marked exhausted (D49): fan-in
+    still needs the increment (a dead chunk can't wedge the meeting), and the
+    stitcher — not this hook — decides the terminal status from the gap it
+    computes."""
 
     def on_exhausted(payload: dict[str, Any], error: str, ctx: JobContext) -> None:
-        tenant_id = payload.get("tenant_id")
-        meeting_id = payload.get("meeting_id")
-        if not isinstance(tenant_id, str) or not isinstance(meeting_id, str):
+        try:
+            msg = ChunkTranscribeV1.model_validate(payload)
+        except ValueError:
             return
-        db.set_meeting_status(
-            deps.conn, tenant_id, meeting_id, "failed", f"transcription failed: {error}"
+        key = job_key(msg.meeting_id, msg.chunk_idx)
+        completion = db.exhaust_chunk_job(deps.conn, msg.meeting_id, key)
+        log.error(
+            "chunk.exhausted",
+            meeting_id=msg.meeting_id,
+            chunk_idx=msg.chunk_idx,
+            error=error,
         )
-        ctx.publish_event(
-            StatusEventV1(
-                tenant_id=tenant_id,
-                meeting_id=meeting_id,
-                status="failed",
-                error=error[:500],
-            )
-        )
+        _maybe_trigger_stitch(deps.conn, msg.tenant_id, msg.meeting_id, completion, ctx)
 
     return on_exhausted
 
@@ -161,7 +189,7 @@ def main() -> None:
     )
 
     def handler(payload: dict[str, Any], ctx: JobContext) -> None:
-        handle_meeting_uploaded(payload, ctx, deps)
+        handle_chunk_transcribe(payload, ctx, deps)
 
     worker = Worker(
         settings, TRANSCRIBER_QUEUE, handler, on_exhausted=make_on_exhausted(deps)
