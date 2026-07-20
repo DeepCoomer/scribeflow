@@ -12,10 +12,30 @@ from pydantic import BaseModel, Field
 
 class MeetingUploadedV1(BaseModel):
     v: Literal[1] = 1
+    # q.slicer now consumes two message shapes (meeting.uploaded and, ticket
+    # 5.3, meeting.finalize) off the same queue — the worker framework's
+    # Handler signature carries no routing key (framework.py), so this
+    # discriminator is how slicer.py tells them apart. Defaulted so it never
+    # breaks a message from before this field existed (CLAUDE.md: additive
+    # schema changes only).
+    type: Literal["meeting.uploaded"] = "meeting.uploaded"
     tenant_id: str
     meeting_id: str
     r2_key: str
     duration_hint_s: float | None = None
+
+
+class MeetingFinalizeV1(BaseModel):
+    """Ticket 5.3, D69: published by the bot orchestrator once a bot session
+    reaches a terminal state with >=1 segment uploaded. Consumed by the
+    slicer worker (it already owns ffmpeg/R2/the publish primitive, D51),
+    which concatenates the bot's rolling segments into the meeting's
+    canonical recording and republishes as a plain meeting.uploaded."""
+
+    v: Literal[1] = 1
+    type: Literal["meeting.finalize"] = "meeting.finalize"
+    tenant_id: str
+    meeting_id: str
 
 
 class ChunkTranscribeV1(BaseModel):

@@ -25,6 +25,12 @@ export const ROUTING_KEYS = {
   meetingStitch: "meeting.stitch",
   meetingExtract: "meeting.extract",
   meetingEmbed: "meeting.embed",
+  // Ticket 5.3 (D69): the slicer worker also owns concatenating a bot's
+  // rolling segments into the meeting's canonical recording.
+  meetingFinalize: "meeting.finalize",
+  // Ticket 5.5: consumed by the bot orchestrator, published by the API's
+  // "invite bot now" endpoint.
+  botSpawn: "bot.spawn",
 } as const;
 
 export const RETRY_TIERS = [
@@ -39,6 +45,12 @@ export const MAX_ATTEMPTS = 1 + RETRY_TIERS.length;
 
 export const PARKING_QUEUE = "q.parking";
 
+// Ticket 5.5 (D31/D70/D72): the bot orchestrator's own spawn queue,
+// deliberately outside WORK_QUEUES below — a stale spawn request should
+// just expire (queue-level TTL), never retry-ladder into q.parking.
+export const BOT_SPAWN_QUEUE_NAME = "q.bot_spawn";
+export const BOT_SPAWN_TTL_MS = 30 * 60 * 1000;
+
 export type QueueSpec = {
   name: string;
   /** pipeline-exchange routing keys bound to this queue */
@@ -51,7 +63,9 @@ export type QueueSpec = {
 // so it isn't mirrored here — see workers/scribeflow_workers/topology.py.
 export const SLICER_QUEUE: QueueSpec = {
   name: "q.slicer",
-  bindings: [ROUTING_KEYS.meetingUploaded],
+  // Ticket 5.3 (D69): meeting.finalize also lands here — the slicer already
+  // owns ffmpeg/R2/the publish primitive (D51).
+  bindings: [ROUTING_KEYS.meetingUploaded, ROUTING_KEYS.meetingFinalize],
 };
 
 export const TRANSCRIBER_QUEUE: QueueSpec = {

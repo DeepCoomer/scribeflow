@@ -720,7 +720,7 @@ findings distilled into meet-bot.md's "Prior art" section and D67–D72.)_
 **D67 — Audio capture stays outside the page: PulseAudio null-sink monitor →
 ffmpeg rolling segments; Chromium launched with
 `ignoreDefaultArgs: ['--mute-audio']`.**
-Both prior arts capture *inside* the page on their Meet lane (screenapp:
+Both prior arts capture _inside_ the page on their Meet lane (screenapp:
 `getDisplayMedia` + `MediaRecorder` shuttling base64 chunks over an exposed
 function; Vexa: per-participant `<audio>`-element capture / an
 `RTCPeerConnection` hook) — but they do so to serve needs ScribeFlow doesn't
@@ -740,7 +740,7 @@ downstream consumes video).
 with a near-normal launch profile: stealth plugin (`iframe.contentWindow` +
 `media.codecs` evasions disabled), no fake-device flags, locale pinned to
 English (`hl=en` + `en-US` context).**
-screenapp's Google lane found Meet fingerprints hardest *before admission* and
+screenapp's Google lane found Meet fingerprints hardest _before admission_ and
 deliberately keeps launch flags minimal there, joining without devices; Vexa
 needs fake devices only for its TTS speak path, which we don't have. Device-less
 also means the bot cannot unmute, ever — a nice property for a consent-first
@@ -749,7 +749,7 @@ product. Locale pinning replaces prior art's per-language selector tables
 complexity). Both prior arts independently ship the same stealth-plugin config,
 which is strong evidence it's the working combination. Anonymous join is the
 default; a dedicated signed-in profile (`BOT_STORAGE_STATE_PATH`) is the
-documented fallback for orgs that block anonymous guests (meet-bot.md). 
+documented fallback for orgs that block anonymous guests (meet-bot.md).
 _Rejected:_ `--use-fake-device-for-media-stream` on the Meet lane (the old
 meet-bot.md draft), per-locale selector variants.
 
@@ -758,7 +758,7 @@ segments are crash insurance only; a slicer-worker handler concatenates them
 (silence-padding wall-clock gaps), uploads the canonical file, and publishes a
 plain `meeting.uploaded`. Supersedes the "skip the slicer" half of D32.**
 The 5.1 review caught that D32's free-chunks idea doesn't survive contact with
-the invariants: `-f segment` produces *non-overlapping* segments, while the
+the invariants: `-f segment` produces _non-overlapping_ segments, while the
 stitcher's dedup rules assume the 10 s overlap (D46/2.1), and diarization needs
 the concatenated full file regardless — so someone must concatenate anyway, and
 a zero-overlap mode would fork the racing engine's tested behavior for one
@@ -798,8 +798,8 @@ channel (no backchannel for presigned URLs).
 detected by a participant-count signal, never by button presence; ≤3
 ask-to-join requests per admission window, denial always terminal; one
 automatic rejoin after an unexpected mid-meeting death.**
-screenapp's field experience: the "Leave call" button exists *while still in
-the lobby*, so admission tests on it produce recordings of the waiting room —
+screenapp's field experience: the "Leave call" button exists _while still in
+the lobby_, so admission tests on it produce recordings of the waiting room —
 the reliable signal is the participant count (`[data-avatar-count]` badge,
 `People - N joined` aria-label) combined with the absence of lobby text. Meet
 also silently expires ask-to-join requests ("No one responded to your
@@ -822,6 +822,72 @@ rare enough that a static operator-set cap covers it. Default ships at 1
 (CLAUDE.md invariant 6's conservative reading); an operator can set 2, which
 the budget table explicitly reserves. _Rejected:_ dynamic
 diarization-load-aware semaphore, hardcoding the cap.
+
+**D73 — `BOT_CONFIG` carries `sessionId`/`orchestratorUrl`/`platform` alongside
+meet-bot.md's documented "meeting id, Meet URL, display name, session token."**
+5.5 implementation: the control-plane client (D70) needs to know its own
+session id (path segment on every call) and where the orchestrator listens
+(`CONTROL_PLANE_HOST`/`PORT`), and the platform strategy interface (Zoom,
+Phase 8) needs a selector too — none of those are derivable from the four
+originally-listed fields. Smallest compliant extension of the documented
+shape, not a redesign. _Rejected:_ a second env var (one JSON blob is
+simpler to pass through `docker run`'s env array than several).
+
+**D74 — `q.slicer`'s two message shapes (`meeting.uploaded`, `meeting.finalize`,
+D69) are told apart by a `type` discriminator field on the message itself,
+defaulted for backward compatibility.**
+5.3 implementation: `framework.py`'s `Handler` signature is `(payload, ctx)`
+with no routing key (workers/scribeflow_workers/framework.py), so a queue
+bound to two routing keys has no other way to dispatch without changing
+that signature for every existing worker. Mirrors the `type` field
+`PipelineEventV1` already uses on the events fanout for the same reason —
+consistent with, not a departure from, existing convention.
+`meetingUploadedV1`'s new `type` field defaults to `"meeting.uploaded"` on
+both sides of the wire (CLAUDE.md: additive schema changes only) so it
+parses identically whether or not a sender sets it explicitly. _Rejected:_
+threading a routing key through `framework.py`'s Handler/JobContext (a
+wider, riskier change to every existing worker for one queue's benefit).
+
+**D75 — `bot_sessions` gets a `meet_url` column beyond the documented
+tenant_id/last_heartbeat_at/outcome_detail additions.**
+5.5 implementation: the reaper's one-automatic-rejoin (D71) needs the
+original Meet URL to relaunch a fresh container, and by the time it fires
+the original `bot.spawn` message is long gone — it stays unacked, not
+requeued, for the session's whole lifetime (D77). Persisting it on the
+session row is the only place left to get it from. Since `bot_sessions`
+had never been migrated before this ticket (the Phase 0 sketch was schema
+prose only), this landed in the same initial `CREATE TABLE` rather than a
+later `ALTER`. _Rejected:_ re-deriving the Meet URL from `meetings.meet_url`
+(a bot invited without a stored `meetUrl`, via the "invite bot now"
+endpoint's override, would have no fallback).
+
+**D76 — `meeting.finalize` sorts a bot's uploaded segments by wall-clock
+`startedAtMs`, not by the `idx` embedded in the segment key.**
+5.3 implementation clarification of meet-bot.md's "lists the segment prefix,
+sorts by index": a rejoin (D71) spawns a fresh ffmpeg process whose own
+segment index restarts at 0 (`Capture` in bot/src/capture.ts always begins
+a new session at `seg_000`), so `idx` alone can collide across a rejoin
+while the embedded wall-clock start time stays monotonic. Sorting by
+`startedAtMs` is what makes the silence-padding gap computation (D69)
+correct across a crash/rejoin boundary, which is the exact scenario the
+padding exists for. _Rejected:_ sorting by idx as literally written (breaks
+under the one documented crash-recovery path this feature exists to serve).
+
+**D77 — The `BOT_MAX_CONCURRENT` static semaphore (D72) is implemented as
+the orchestrator's AMQP channel prefetch on `q.bot_spawn`; a spawn message
+is acked only once its session reaches a terminal state.**
+5.5 implementation: meet-bot.md specifies the semaphore's existence and
+default but not its mechanism. RabbitMQ won't deliver more than `prefetch`
+unacked messages to a consumer, so holding a spawn message unacked for a
+session's entire lifetime (recorded meeting length included) _is_ the
+concurrency cap, with no extra state to keep in sync — the alternative
+(track an in-memory counter, nack/requeue-with-delay when at capacity) adds
+a second source of truth that can drift from reality on a crash. The
+job-key idempotency check (invariant 3, `{meetingId}:bot:0`) still guards
+against a redelivery after an orchestrator restart double-spawning.
+_Rejected:_ an in-memory counter with delayed requeue, a Postgres advisory
+lock (D24's pattern, but this isn't a rate limit — it's "how many
+in-flight," which prefetch already models for free).
 
 ## Frontend & demo
 

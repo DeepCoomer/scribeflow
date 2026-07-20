@@ -20,7 +20,11 @@ import { getSummary, markSummaryEmailSent } from "../db/repositories/summaries.j
 import { getLastFollowup, recordFollowupSent } from "../db/repositories/followups.js";
 import { composeDefaultFollowup } from "../lib/followup.js";
 import { ROUTING_KEYS } from "../queue/topology.js";
-import type { MeetingUploadedV1, PipelineEventV1 } from "../queue/messages.js";
+import type {
+  BotSpawnV1,
+  MeetingUploadedV1,
+  PipelineEventV1,
+} from "../queue/messages.js";
 import { parseCorsOrigins } from "../lib/cors.js";
 import { startSse, sendSse } from "../lib/sse.js";
 
@@ -61,6 +65,11 @@ const speakerParamSchema = z.object({ id: z.string().uuid(), label: z.string().m
 const renameSpeakerSchema = z.object({
   displayName: z.string().min(1).max(100),
   userId: z.string().uuid().nullable().optional(),
+});
+
+const inviteBotSchema = z.object({
+  meetUrl: z.string().url().optional(),
+  displayName: z.string().min(1).max(100).optional(),
 });
 
 const followupSendSchema = z.object({ body: z.string().min(1).max(20_000) });
@@ -198,6 +207,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
 
     const message: MeetingUploadedV1 = {
       v: 1,
+      type: "meeting.uploaded",
       tenant_id: tenantId,
       meeting_id: id,
       r2_key: meeting.r2Key,
@@ -212,6 +222,40 @@ export default async function meetingRoutes(app: FastifyInstance) {
     }
     const updated = await markUploaded(app.db, tenantId, id, body.durationHintS);
     return meetingView(updated ?? meeting);
+  });
+
+  // Ticket 5.5 — "invite bot now": publishes bot.spawn for the orchestrator
+  // to pick up off q.bot_spawn. Meeting status is untouched here (it stays
+  // untouched until meeting.uploaded, docs/meet-bot.md); the dashboard
+  // watches the bot's own lifecycle via the "bot" SSE event instead.
+  app.post("/meetings/:id/bot", protectedOpts, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const body = inviteBotSchema.parse(request.body ?? {});
+    const { tenantId } = request.auth!;
+
+    const meeting = await findMeetingById(app.db, tenantId, id);
+    if (!meeting) return reply.notFound();
+    const meetUrl = body.meetUrl ?? meeting.meetUrl;
+    if (!meetUrl) {
+      return reply.badRequest("meetUrl is required (meeting has none on file)");
+    }
+
+    const message: BotSpawnV1 = {
+      v: 1,
+      tenant_id: tenantId,
+      meeting_id: id,
+      meet_url: meetUrl,
+      display_name: body.displayName ?? null,
+      requested_at: new Date().toISOString(),
+    };
+
+    try {
+      await app.queue.publish(ROUTING_KEYS.botSpawn, message);
+    } catch (err) {
+      request.log.error(err, "failed to enqueue bot.spawn");
+      return reply.serviceUnavailable("queue unavailable, retry shortly");
+    }
+    return reply.code(202).send({ requested: true });
   });
 
   app.get("/meetings/:id/transcript", protectedOpts, async (request, reply) => {
@@ -462,6 +506,19 @@ export default async function meetingRoutes(app: FastifyInstance) {
 
     const unsubscribe = app.events.subscribe(auth.tenantId, (event: PipelineEventV1) => {
       if (event.meeting_id !== id) return;
+      if (event.type === "bot.status") {
+        // Ticket 5.5: a bot session's lifecycle state isn't the meeting's
+        // pipeline status (meeting.status stays untouched until
+        // meeting.uploaded) — its own SSE event name, same reasoning as
+        // extraction below.
+        sendSse(reply, "bot", {
+          meeting_id: event.meeting_id,
+          sessionId: event.session_id,
+          state: event.state,
+          detail: event.detail,
+        });
+        return;
+      }
       // 3.1/3.2 (D59): extraction never changes meeting.status, so it gets
       // its own SSE event name — the dashboard uses it to refetch the
       // summary/action items without confusing it for a transcript-state

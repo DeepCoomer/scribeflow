@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mock Meet</title>
+  </head>
+  <body>
+    <div id="signin" hidden>
+      <h1>Sign in</h1>
+    </div>
+    <div id="invalid" hidden>
+      <p>Check your meeting code and try again</p>
+    </div>
+    <div id="prejoin" hidden>
+      <button id="continueBtn" type="button">
+        Continue without microphone and camera
+      </button>
+      <input type="text" id="nameInput" placeholder="Your name" />
+      <button id="askBtn" type="button">Ask to join</button>
+    </div>
+    <div id="lobby" hidden>
+      <p>Asking to join&hellip;</p>
+      <p id="expiredText" hidden>No one responded to your request</p>
+      <p id="deniedText" hidden>Someone in the call denied your request to join</p>
+    </div>
+    <div id="incall" hidden>
+      <button id="peopleBtn" type="button" aria-label="People - 1">People</button>
+      <button id="gotIt" type="button">Got it</button>
+      <button id="chatOpen" type="button">Chat with everyone</button>
+      <textarea id="chatInput" aria-label="Send a message"></textarea>
+      <button id="chatSend" type="button">Send</button>
+      <button id="leaveBtn" type="button">Leave call</button>
+    </div>
+
+    <!-- Not toggled by show() — a removal banner can land whether the bot is
+       still in the lobby or already admitted, so it's a standalone overlay
+       rather than nested under one particular panel. -->
+    <p id="removedText" hidden>You&#39;ve been removed from the meeting</p>
+
+    <script>
+      function show(id) {
+        for (const el of document.querySelectorAll("body > div")) {
+          el.hidden = el.id !== id;
+        }
+      }
+
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("scenario") || "prejoin";
+      if (scenario === "blocked") show("signin");
+      else if (scenario === "invalid") show("invalid");
+      else show("prejoin");
+
+      window.__askCount = 0;
+      window.__lastChatMessage = null;
+      window.__leftCall = false;
+
+      window.mock = {
+        admit(count) {
+          show("incall");
+          document.getElementById("removedText").hidden = true;
+          document
+            .getElementById("peopleBtn")
+            .setAttribute("aria-label", "People - " + count);
+        },
+        setParticipantCount(count) {
+          document
+            .getElementById("peopleBtn")
+            .setAttribute("aria-label", "People - " + count);
+        },
+        deny() {
+          show("lobby");
+          document.getElementById("deniedText").hidden = false;
+        },
+        expire() {
+          document.getElementById("expiredText").hidden = false;
+        },
+        remove() {
+          document.getElementById("removedText").hidden = false;
+        },
+        redirectAway() {
+          location.href = "https://example.com/kicked";
+        },
+      };
+
+      document.getElementById("askBtn").addEventListener("click", () => {
+        window.__askCount += 1;
+        show("lobby");
+      });
+      document.getElementById("gotIt").addEventListener("click", () => {
+        document.getElementById("gotIt").hidden = true;
+      });
+      document.getElementById("leaveBtn").addEventListener("click", () => {
+        window.__leftCall = true;
+      });
+      document.getElementById("chatSend").addEventListener("click", () => {
+        window.__lastChatMessage = document.getElementById("chatInput").value;
+      });
+
+      // Test-only scenario timers: scripted state transitions so a test can
+      // drive the join-flow/lifecycle polling loops against real elapsed
+      // time without any Node-side page.evaluate race.
+      function scheduleFromParam(name, fn) {
+        const raw = params.get(name);
+        if (raw === null) return;
+        setTimeout(fn, Number(raw));
+      }
+      scheduleFromParam("autoAdmitAfterMs", () =>
+        window.mock.admit(Number(params.get("autoAdmitCount") || "2")),
+      );
+      scheduleFromParam("autoDenyAfterMs", () => window.mock.deny());
+      scheduleFromParam("autoExpireAfterMs", () => window.mock.expire());
+      scheduleFromParam("autoRemoveAfterMs", () => window.mock.remove());
+      scheduleFromParam("autoRedirectAfterMs", () => window.mock.redirectAway());
+      scheduleFromParam("autoParticipantCountAfterMs", () =>
+        window.mock.setParticipantCount(
+          Number(params.get("autoParticipantCount") || "1"),
+        ),
+      );
+    </script>
+  </body>
+</html>

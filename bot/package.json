@@ -4,6 +4,31 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "typecheck": "echo 'bot: nothing to typecheck yet (Phase 5)'"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "bot": "tsx src/main.ts",
+    "orchestrator": "tsx src/orchestrator/index.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.716.0",
+    "@aws-sdk/s3-request-presigner": "^3.716.0",
+    "amqplib": "^0.10.5",
+    "dockerode": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "fastify-plugin": "^5.0.1",
+    "playwright": "^1.49.1",
+    "playwright-extra": "^4.3.6",
+    "postgres": "^3.4.5",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.6",
+    "@types/dockerode": "^3.3.31",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
   }
 }

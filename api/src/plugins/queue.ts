@@ -9,6 +9,8 @@ import {
   PARKING_QUEUE,
   ROUTING_KEYS,
   TRANSCRIBER_QUEUE,
+  BOT_SPAWN_QUEUE_NAME,
+  BOT_SPAWN_TTL_MS,
   retryQueueName,
 } from "../queue/topology.js";
 
@@ -59,6 +61,14 @@ async function assertTopology(ch: ConfirmChannel) {
     durable: true,
     arguments: { "x-queue-type": "quorum" },
   });
+
+  // Ticket 5.5 (D31/D70/D72): no retry ladder — a stale spawn request just
+  // expires.
+  await ch.assertQueue(BOT_SPAWN_QUEUE_NAME, {
+    durable: true,
+    arguments: { "x-message-ttl": BOT_SPAWN_TTL_MS },
+  });
+  await ch.bindQueue(BOT_SPAWN_QUEUE_NAME, PIPELINE_EXCHANGE, ROUTING_KEYS.botSpawn);
 
   // Phase 1->2 migration (D45): q.transcriber used to bind meeting.uploaded
   // directly. RabbitMQ never drops a binding just because the code stopped

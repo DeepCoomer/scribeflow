@@ -238,6 +238,41 @@ services:
         limits:
           memory: 128m
 
+  # Ticket 5.5: spawns/tracks/reaps one Docker container per Meet-bot
+  # session (bot/Dockerfile — a completely different, much heavier image
+  # built from the same bot/ package, launched dynamically via dockerode,
+  # never declared as its own compose service since it's ephemeral and
+  # per-meeting). This is the only bot-adjacent process that ever holds R2/
+  # Postgres/RabbitMQ credentials or the Docker socket (D70) — the bot
+  # containers it spawns get neither, which is the deliberate, smallest
+  # escape surface docs/meet-bot.md calls out for 7.1's security review to
+  # scrutinize. DOCKER_NETWORK matches this file's top-level `name:` so
+  # spawned bot containers can resolve CONTROL_PLANE_HOST by service name.
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: bot/orchestrator.Dockerfile
+    <<: *restart
+    env_file: ../bot/.env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-scribeflow}:${POSTGRES_PASSWORD:-scribeflow}@postgres:5432/${POSTGRES_DB:-scribeflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-scribeflow}:${RABBITMQ_PASSWORD:-scribeflow}@rabbitmq:5672
+      CONTROL_PLANE_HOST: orchestrator
+      DOCKER_NETWORK: scribeflow_default
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
   # Public ingress (D39): Caddy terminates TLS with automatic Let's Encrypt
   # certs and proxies to the api container. VM-only — don't start this
   # locally (it binds 80/443 and would try to obtain real certificates).

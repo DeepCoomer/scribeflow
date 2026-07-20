@@ -3,6 +3,11 @@ compute the chunk plan (D46) -> ffmpeg-slice to 16 kHz mono FLAC (D47),
 upload each chunk to R2 -> publish one chunk.transcribe job per chunk plus
 one meeting.diarize job for the full file.
 
+Also handles meeting.finalize (ticket 5.3, D69): concatenates a bot
+session's rolling segments into the meeting's canonical recording and
+republishes as a plain meeting.uploaded, off the same q.slicer queue — it
+already owns ffmpeg/R2/the publish primitive (D51).
+
 Run: python -m scribeflow_workers.slicer
 """
 
@@ -18,12 +23,24 @@ from .chunking import compute_chunk_plan
 from .config import Settings, get_settings
 from .framework import JobContext, PermanentError, Worker
 from .logging import configure_logging, get_logger
-from .messages import ChunkTranscribeV1, MeetingDiarizeV1, MeetingUploadedV1, StatusEventV1
-from .topology import CHUNK_TRANSCRIBE, MEETING_DIARIZE, SLICER_QUEUE
+from .messages import (
+    ChunkTranscribeV1,
+    MeetingDiarizeV1,
+    MeetingFinalizeV1,
+    MeetingUploadedV1,
+    StatusEventV1,
+)
+from .topology import CHUNK_TRANSCRIBE, MEETING_DIARIZE, MEETING_UPLOADED, SLICER_QUEUE
 
 log = get_logger("slicer")
 
 STAGE = "slice"
+FINALIZE_STAGE = "finalize"
+# A back-to-back segment boundary has a few ms of scheduling jitter even
+# with no real gap; only pad wall-clock gaps bigger than this (docs/
+# meet-bot.md doesn't pin an exact value — this is the implementation's
+# call on "a crash + rejoin leaves a hole" vs. normal jitter).
+GAP_EPSILON_MS = 500
 
 
 @dataclass
@@ -118,6 +135,92 @@ def _run(msg: MeetingUploadedV1, ctx: JobContext, deps: Deps, key: str) -> None:
         raise
 
 
+def finalize_job_key(meeting_id: str) -> str:
+    return f"{meeting_id}:{FINALIZE_STAGE}:0"
+
+
+def handle_meeting_finalize(payload: dict[str, Any], ctx: JobContext, deps: Deps) -> None:
+    try:
+        msg = MeetingFinalizeV1.model_validate(payload)
+    except ValueError as err:
+        raise PermanentError(f"invalid meeting.finalize message: {err}") from err
+
+    key = finalize_job_key(msg.meeting_id)
+    try:
+        _run_finalize(msg, ctx, deps, key)
+    except Exception:
+        deps.conn.rollback()
+        raise
+
+
+def _run_finalize(msg: MeetingFinalizeV1, ctx: JobContext, deps: Deps, key: str) -> None:
+    if not db.claim_job(deps.conn, msg.tenant_id, msg.meeting_id, key, FINALIZE_STAGE):
+        log.info("job.skipped_already_done", job_key=key)
+        return
+
+    segments = r2.list_bot_segments(
+        deps.r2_client, deps.settings.r2_bucket, msg.tenant_id, msg.meeting_id
+    )
+    if not segments:
+        # A finalize job is only ever published once >=1 segment was
+        # uploaded (docs/meet-bot.md) — an empty listing means the message
+        # is malformed or arrived before R2 read-after-write consistency
+        # caught up; retrying won't invent segments that were never
+        # produced, so this is permanent, not the retry ladder.
+        raise PermanentError(f"no bot segments found for meeting {msg.meeting_id}")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            local_paths = [
+                r2.download(deps.r2_client, deps.settings.r2_bucket, seg.key, tmp_dir)
+                for seg in segments
+            ]
+            durations_s = [media.probe_duration_s(p) for p in local_paths]
+
+            concat_inputs: list[Path] = []
+            cursor_ms: float = segments[0].started_at_ms
+            for idx, (seg, local_path, duration_s) in enumerate(
+                zip(segments, local_paths, durations_s)
+            ):
+                gap_ms = seg.started_at_ms - cursor_ms
+                if gap_ms > GAP_EPSILON_MS:
+                    silence_path = tmp_dir / f"silence-{idx}.ogg"
+                    media.generate_silence(silence_path, gap_ms / 1000)
+                    concat_inputs.append(silence_path)
+                concat_inputs.append(local_path)
+                cursor_ms = seg.started_at_ms + duration_s * 1000
+
+            final_path = tmp_dir / "recording.ogg"
+            media.concat_audio(concat_inputs, final_path)
+
+            r2_key = r2.canonical_recording_key(msg.tenant_id, msg.meeting_id)
+            r2.upload(deps.r2_client, deps.settings.r2_bucket, r2_key, final_path)
+
+        db.set_meeting_r2_key(deps.conn, msg.tenant_id, msg.meeting_id, r2_key)
+        total_duration_s = (cursor_ms - segments[0].started_at_ms) / 1000
+        ctx.publish(
+            MEETING_UPLOADED,
+            MeetingUploadedV1(
+                tenant_id=msg.tenant_id,
+                meeting_id=msg.meeting_id,
+                r2_key=r2_key,
+                duration_hint_s=total_duration_s,
+            ),
+        )
+        db.complete_job(deps.conn, key)
+        log.info(
+            "meeting.finalized",
+            meeting_id=msg.meeting_id,
+            segments=len(segments),
+            r2_key=r2_key,
+            duration_s=total_duration_s,
+        )
+    except Exception as err:
+        db.fail_job(deps.conn, key, repr(err))
+        raise
+
+
 def make_on_exhausted(deps: Deps) -> Any:
     """A slicer failure normally fails the whole meeting outright — unlike a
     chunk-transcribe exhaustion (D49), there's usually no fan-in yet to keep
@@ -138,8 +241,9 @@ def make_on_exhausted(deps: Deps) -> Any:
         meeting_id = payload.get("meeting_id")
         if not isinstance(tenant_id, str) or not isinstance(meeting_id, str):
             return
+        stage_label = "finalizing" if payload.get("type") == "meeting.finalize" else "slicing"
         transitioned = db.fail_meeting_if_not_terminal(
-            deps.conn, tenant_id, meeting_id, f"slicing failed: {error}"
+            deps.conn, tenant_id, meeting_id, f"{stage_label} failed: {error}"
         )
         if not transitioned:
             log.info(
@@ -168,7 +272,13 @@ def main() -> None:
     )
 
     def handler(payload: dict[str, Any], ctx: JobContext) -> None:
-        handle_meeting_uploaded(payload, ctx, deps)
+        # q.slicer carries two message shapes (D69); the worker framework's
+        # Handler signature has no routing key, so dispatch on the payload's
+        # own `type` discriminator instead (messages.py).
+        if payload.get("type") == "meeting.finalize":
+            handle_meeting_finalize(payload, ctx, deps)
+        else:
+            handle_meeting_uploaded(payload, ctx, deps)
 
     worker = Worker(settings, SLICER_QUEUE, handler, on_exhausted=make_on_exhausted(deps))
     worker.run()

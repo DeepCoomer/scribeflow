@@ -26,17 +26,18 @@ Domain renewal for `deepcoomer.dev` is the only pre-existing cost; no new spend.
   is final (keep transcripts/metrics forever — they live in Postgres).
 - **12 GB RAM budget on the VM:**
 
-  | Service                                          | Reserved |
-  | ------------------------------------------------ | -------- |
-  | Postgres                                         | 1 GB     |
-  | RabbitMQ                                         | 0.75 GB  |
-  | API + Caddy ingress                              | 1 GB     |
-  | Python workers (slice/transcribe/stitch/extract) | 1.5 GB   |
-  | pyannote diarizer (peak)                         | 2 GB     |
-  | sentence-transformers embedder (ticket 3.5, D63) | 0.75 GB  |
-  | nudger (ticket 3.8, D66 — no queue, no model)    | 0.125 GB |
-  | 2 Meet-bot containers (Chromium + Xvfb × 2)      | 4 GB     |
-  | Headroom / page cache                            | 0.875 GB |
+  | Service                                                                                                | Reserved |
+  | ------------------------------------------------------------------------------------------------------ | -------- |
+  | Postgres                                                                                               | 1 GB     |
+  | RabbitMQ                                                                                               | 0.75 GB  |
+  | API + Caddy ingress                                                                                    | 1 GB     |
+  | Python workers (slice/transcribe/stitch/extract)                                                       | 1.5 GB   |
+  | pyannote diarizer (peak)                                                                               | 2 GB     |
+  | sentence-transformers embedder (ticket 3.5, D63)                                                       | 0.75 GB  |
+  | nudger (ticket 3.8, D66 — no queue, no model)                                                          | 0.125 GB |
+  | bot orchestrator (ticket 5.5 — dockerode + a small Fastify control plane, no browser/model of its own) | 0.125 GB |
+  | 2 Meet-bot containers (Chromium + Xvfb × 2)                                                            | 4 GB     |
+  | Headroom / page cache                                                                                  | 0.75 GB  |
 
   Dropping ClickHouse (D42) freed 3 GB, which buys the **second concurrent
   bot-recorded meeting**. The orchestrator enforces the cap with a static

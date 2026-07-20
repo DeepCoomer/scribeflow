@@ -374,6 +374,74 @@ export const meetingFollowups = pgTable(
   (t) => [uniqueIndex("meeting_followups_meeting_idx").on(t.meetingId)],
 );
 
+// --- bot_sessions ---------------------------------------------------------
+// Phase 5 (tickets 5.2-5.5): one row per Meet-bot container spawn attempt.
+// The Phase 0 sketch (docs/architecture.md) was never turned into a table
+// before this, so the 5.5 additions (tenantId, lastHeartbeatAt,
+// outcomeDetail) are realized directly in the initial CREATE TABLE rather
+// than as a later ALTER. `state` follows the join/lifecycle taxonomy from
+// docs/meet-bot.md exactly (bot/src/state.ts's BOT_STATES — keep both in
+// sync in the same commit, same rule as the queue topology mirror).
+// containerId/segmentsUploaded/rejoined back the orchestrator's reaper
+// (5.5): a heartbeat gone silent > BOT_HEARTBEAT_TIMEOUT_S triggers a
+// `docker inspect` by containerId, segmentsUploaded > 0 gates whether
+// meeting.finalize gets published, and rejoined caps the "one automatic
+// rejoin" rule (D71) per session.
+
+export const botSessionStateEnum = pgEnum("bot_session_state", [
+  "spawning",
+  "joining",
+  "lobby",
+  "recording",
+  "leaving",
+  "done",
+  "not_admitted",
+  "denied",
+  "blocked",
+  "invalid_url",
+  "failed",
+]);
+
+export const botSessions = pgTable(
+  "bot_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    meetingId: uuid("meeting_id")
+      .notNull()
+      .references(() => meetings.id, { onDelete: "cascade" }),
+    // Deterministic per invariant 3: "{meetingId}:bot:0" — one non-terminal
+    // session per meeting (5.5's queue consumer checks this before spawning).
+    jobKey: text("job_key").notNull(),
+    // Carried over from the bot.spawn message so the reaper's one-automatic
+    // -rejoin (D71) can relaunch without needing the original message —
+    // it's long gone by then (the spawn message stays unacked, not
+    // requeued, for the session's whole lifetime, D72).
+    meetUrl: text("meet_url").notNull(),
+    containerId: text("container_id"),
+    state: botSessionStateEnum("state").notNull().default("spawning"),
+    // Per-session control-plane auth (D70) — the bot container gets this
+    // and nothing else; every /sessions/:id/* call is checked against it.
+    sessionToken: text("session_token").notNull(),
+    segmentsUploaded: integer("segments_uploaded").notNull().default(0),
+    rejoined: boolean("rejoined").notNull().default(false),
+    joinedAt: timestamp("joined_at", { withTimezone: true }),
+    leftAt: timestamp("left_at", { withTimezone: true }),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+    error: text("error"),
+    outcomeDetail: text("outcome_detail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("bot_sessions_job_key_idx").on(t.jobKey),
+    // The reaper's "who's gone quiet" scan and the dashboard's live status
+    // both filter by tenant + non-terminal state.
+    index("bot_sessions_tenant_state_idx").on(t.tenantId, t.state),
+  ],
+);
+
 // --- rate_limiter_buckets ---------------------------------------------------
 // Backing row for the shared Groq token bucket (D24): workers take a Postgres
 // advisory lock keyed on the bucket, refill tokens by elapsed time, and spend

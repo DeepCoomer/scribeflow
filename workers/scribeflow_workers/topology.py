@@ -21,6 +21,15 @@ MEETING_DIARIZE = "meeting.diarize"
 MEETING_STITCH = "meeting.stitch"
 MEETING_EXTRACT = "meeting.extract"
 MEETING_EMBED = "meeting.embed"
+# Ticket 5.3, D69: the slicer worker also owns concatenating a bot's rolling
+# segments into the meeting's canonical recording.
+MEETING_FINALIZE = "meeting.finalize"
+# Ticket 5.5: the bot orchestrator's own spawn queue — deliberately outside
+# WORK_QUEUES below, since a stale spawn request should just expire, never
+# retry-ladder into q.parking (D31/D72).
+BOT_SPAWN = "bot.spawn"
+BOT_SPAWN_QUEUE = "q.bot_spawn"
+BOT_SPAWN_TTL_MS = 30 * 60 * 1000
 
 PARKING_QUEUE = "q.parking"
 
@@ -56,7 +65,9 @@ def retry_queue_name(queue: str, tier_suffix: str) -> str:
 # whole meeting's ffmpeg work, so prefetch stays 1. The transcriber moves to
 # chunk.transcribe with prefetch 4 (IO-bound, competing consumers per
 # docs/architecture.md); the diarizer is CPU-bound so prefetch stays 1.
-SLICER_QUEUE = QueueSpec(name="q.slicer", bindings=(MEETING_UPLOADED,))
+# Ticket 5.3 (D69) adds the second binding: meeting.finalize also lands here
+# since the slicer already owns ffmpeg/R2/the publish primitive (D51).
+SLICER_QUEUE = QueueSpec(name="q.slicer", bindings=(MEETING_UPLOADED, MEETING_FINALIZE))
 TRANSCRIBER_QUEUE = QueueSpec(name="q.transcriber", bindings=(CHUNK_TRANSCRIBE,), prefetch=4)
 DIARIZER_QUEUE = QueueSpec(name="q.diarizer", bindings=(MEETING_DIARIZE,))
 STITCHER_QUEUE = QueueSpec(name="q.stitcher", bindings=(MEETING_STITCH,))
@@ -117,6 +128,16 @@ def declare_topology(channel: BlockingChannel) -> None:
     channel.queue_declare(
         PARKING_QUEUE, durable=True, arguments={"x-queue-type": "quorum"}
     )
+
+    # Ticket 5.5 (D31/D70/D72): classic queue, no retry ladder — a spawn
+    # request past its TTL should simply vanish (the orchestrator's own
+    # requested_at staleness check is belt-and-suspenders for anything
+    # delivered just under the wire), never dead-letter into q.parking for a
+    # human to look at.
+    channel.queue_declare(
+        BOT_SPAWN_QUEUE, durable=True, arguments={"x-message-ttl": BOT_SPAWN_TTL_MS}
+    )
+    channel.queue_bind(BOT_SPAWN_QUEUE, PIPELINE_EXCHANGE, routing_key=BOT_SPAWN)
 
     # Phase 1->2 migration (D45): q.transcriber used to bind meeting.uploaded
     # directly. RabbitMQ never drops a binding just because the code stopped

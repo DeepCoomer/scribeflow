@@ -419,6 +419,22 @@ def get_speaker_turns_for_stitch(
     return [(r[0], r[1], r[2]) for r in rows]
 
 
+def set_meeting_r2_key(
+    conn: psycopg.Connection[Any], tenant_id: str, meeting_id: str, r2_key: str
+) -> None:
+    """Ticket 5.3 (D69): the finalize handler's write of the meeting's
+    canonical recording location — the API's upload flow sets this itself
+    (markUploadStarted), but a bot-originated meeting never goes through
+    that endpoint, so the worker sets it here instead. Plain overwrite is
+    fine under redelivery (D15): a re-finalize recomputes the same key."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE meetings SET r2_key = %s WHERE id = %s AND tenant_id = %s",
+            (r2_key, meeting_id, tenant_id),
+        )
+    conn.commit()
+
+
 def set_meeting_status(
     conn: psycopg.Connection[Any],
     tenant_id: str,

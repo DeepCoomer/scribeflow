@@ -5,6 +5,8 @@ before download as defense in depth (D20)."""
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,3 +43,54 @@ def upload(client: Any, bucket: str, r2_key: str, local_path: Path) -> None:
 
 def chunk_key(tenant_id: str, meeting_id: str, chunk_idx: int) -> str:
     return f"tenant/{tenant_id}/meeting/{meeting_id}/chunks/{chunk_idx}.flac"
+
+
+# -- bot segments / finalize (ticket 5.3, D69) ---------------------------------
+
+
+def bot_segment_prefix(tenant_id: str, meeting_id: str) -> str:
+    return f"tenant/{tenant_id}/meeting/{meeting_id}/bot-segments/"
+
+
+def canonical_recording_key(tenant_id: str, meeting_id: str) -> str:
+    return f"tenant/{tenant_id}/meeting/{meeting_id}/recording.ogg"
+
+
+def debug_key(tenant_id: str, meeting_id: str, name: str) -> str:
+    return f"tenant/{tenant_id}/meeting/{meeting_id}/bot-debug/{name}"
+
+
+_SEGMENT_KEY_RE = re.compile(r"(\d+)_(\d+)\.ogg$")
+
+
+@dataclass(frozen=True)
+class BotSegmentObject:
+    key: str
+    idx: int
+    started_at_ms: int
+
+
+def list_bot_segments(
+    client: Any, bucket: str, tenant_id: str, meeting_id: str
+) -> list[BotSegmentObject]:
+    """Every uploaded segment for a meeting, oldest first by wall-clock start
+    time. Sorted by started_at_ms rather than idx: a rejoin (D71 — one
+    automatic rejoin on unexpected death) spawns a fresh ffmpeg process whose
+    own segment index restarts at 0, so idx alone can collide across a
+    rejoin while wall-clock time stays monotonic."""
+    prefix = bot_segment_prefix(tenant_id, meeting_id)
+    objects: list[BotSegmentObject] = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            match = _SEGMENT_KEY_RE.search(key)
+            if not match:
+                continue
+            objects.append(
+                BotSegmentObject(
+                    key=key, idx=int(match.group(1)), started_at_ms=int(match.group(2))
+                )
+            )
+    objects.sort(key=lambda o: o.started_at_ms)
+    return objects

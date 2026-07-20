@@ -1,6 +1,6 @@
 # ScribeFlow — Master Plan
 
-_Last updated: 2026-07-19 (Phase 3b complete; 5.1 done)_
+_Last updated: 2026-07-20 (Phase 3b complete; 5.1-5.5 done)_
 
 ## 1. Feasibility verdict: yes, $0/month is realistic
 
@@ -265,6 +265,71 @@ also resolved the D31-vs-infrastructure.md concurrency drift (static
 `BOT_MAX_CONCURRENT`, default 1). 5.2 can start independently of 1.8 —
 the image is arm64 and runs on Apple Silicon locally; only live VM
 deployment waits on Oracle capacity._
+
+_**5.2-5.5 done** (2026-07-20, one combined session per user request — see
+the model-assignment deviation note below). **5.2** adds the `bot/`
+workspace (`@scribeflow/bot`, TS strict): the arm64 container (Xvfb +
+PulseAudio null sink + headful Playwright/playwright-extra+stealth
+Chromium, PID-1 signal-forwarding `entrypoint.sh` per D67), the
+`PlatformStrategy` interface with a working `meet` implementation and a
+Phase-8-stub `zoom` one, the join-flow state machine through `recording`
+with the full outcome taxonomy, and the mock-Meet-page Playwright test
+strategy (`tests/fixtures/mockMeet.html` + `page.route` interception, so
+`page.url()` genuinely carries the Meet origin the redirect/blocked checks
+need — no real network, no real Meet). **5.3** adds the ffmpeg segment
+capture chain (`Capture`, rolling 16 kHz mono Opus segments, closed-segment
+detection by watching for the next index to appear on disk), the RMS audio
+health probe with the one-restart-then-alert rule, presigned segment/debug
+uploads through the control plane, and the `meeting.finalize` handler in
+the slicer worker (concatenates a bot session's segments with
+silence-padded wall-clock gaps, D69) — `q.slicer` now dispatches
+`meeting.uploaded` vs `meeting.finalize` by a `type` discriminator on the
+message itself, since the worker framework's handler signature carries no
+routing key (D74); segments are sorted by wall-clock `startedAtMs` rather
+than the embedded `idx`, since a rejoin restarts `idx` at 0 (D76). **5.4**
+adds the leave-condition monitor (lone-participant/no-one-joined/removed/
+redirected/max-duration/orchestrator-signal) and the graceful exit ladder
+(Leave click → ffmpeg stdin `q` → SIGTERM\@15s → SIGKILL\@+5s → flush →
+report). **5.5** adds `bot/src/orchestrator` (dockerode + a small Fastify
+control plane): the `q.bot_spawn` consumer with the static
+`BOT_MAX_CONCURRENT` semaphore implemented as the AMQP channel's prefetch
+count — a spawn message stays unacked for its session's whole lifetime,
+which *is* the concurrency cap (D77) — the heartbeat/event/segment-url/
+debug-url control-plane endpoints (D70, bot holds zero infra credentials),
+the reaper (heartbeat-silent detection, one automatic rejoin per D71,
+`meeting.finalize` publish when segments exist), the `bot_sessions`
+migration (realized directly with the 5.5 fields since the Phase 0 sketch
+was never previously migrated, plus a `meet_url` column the rejoin path
+needs, D75), and the API's `POST /meetings/:id/bot` "invite bot now"
+endpoint. New D-entries: D73-D77 (docs/decisions.md) cover these
+implementation-level clarifications of the 5.1 spec — none change its
+architecture. Verified: `pnpm lint`/`typecheck`/`test` all green (84 TS
+tests: 54 in `bot/` — mock-Meet-page Playwright tests for join/lifecycle,
+unit tests for the launch profile/capture/control-plane client, and
+fake-docker/fake-queue/fake-db tests for the orchestrator's spawn/reaper/
+control-plane-server logic — plus 30 existing API tests unaffected);
+workers `ruff`/`mypy`/`pytest` green (126 tests, 9 new for the finalize
+handler including the gap-padding math); both `docker build` (bot/Dockerfile
+and the new `bot/orchestrator.Dockerfile`) succeed on arm64, and a smoke
+run of the built bot image confirms Xvfb/PulseAudio/Chromium actually come
+up and the join flow runs (it fails past that point only because the smoke
+test has no real orchestrator/Meet URL to reach, as expected). Not done:
+an actual live-Meet join (no live network calls in CI/this session, per
+repo policy — real-Meet testing is 5.6's manual reserve) and a live
+orchestrator+bot integration run against real Postgres/RabbitMQ/R2/Docker
+together (each side is fake-tested in isolation per the ticket's own
+testing strategy, but the full wire-up was not run end-to-end this
+session). Deviation from the model-strategy table: 5.2-5.5 ran on
+**Sonnet** by explicit user request, in one combined session, rather than
+one-Opus-ticket-per-session as originally planned — noted here rather than
+changing the table, the same deviation pattern as every implementation
+phase since 2.2 (Opus stays the documented default for this shape of
+ticket going forward). Next: 5.6 (Fable, reserved for when a real-Meet
+session finds a selector/UI issue) is on standby, not scheduled; Phase 4.1
+(Postgres `utterance_metrics`) remains the available parallel track; Phase
+6 (calendar auto-join) is the natural next flagship step once 1.8's Oracle
+VM capacity frees up for a live deployment to actually test the bot
+against._
 
 | #   | Ticket                                                                                                                                 | Model                              |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |

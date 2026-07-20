@@ -3,6 +3,10 @@ packages:
   - "web"
   - "bot"
 allowBuilds:
+  # dockerode's optional SSH transport (ticket 5.5) — we only ever connect
+  # over the unix socket, so neither native build is needed.
+  cpu-features: false
+  ssh2: false
   esbuild: true
   protobufjs: true
   sharp: true
